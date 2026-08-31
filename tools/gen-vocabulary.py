@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generate companion/wire Vocabulary.kt from ebp/contract.json (format 10).
+"""Generate wire/Vocabulary.kt from the canonical EBP contract.
 
 The W0 pattern: wire vocabulary is generated from the authored contract,
 never hand-maintained; a drift test re-reads contract.json and fails if the
-committed generated file disagrees. Run from the llm-poc-3 root:
+committed generated file disagrees. Run from the ebp-kmp root:
 
     python3 tools/gen-vocabulary.py
 
@@ -14,17 +14,31 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-contract = json.loads((ROOT / "ebp" / "contract.json").read_text(encoding="utf-8"))
-
-OUT = ROOT / "companion/wire/src/jvmMain/kotlin/com/calebc42/ebp/wire/Vocabulary.kt"
 
 parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument(
+    "--spec-dir",
+    type=Path,
+    default=ROOT.parent / "ebp",
+    help="canonical EBP specification checkout (default: sibling ../ebp)",
+)
+parser.add_argument(
+    "--output",
+    type=Path,
+    default=ROOT / "wire/src/jvmMain/kotlin/com/calebc42/ebp/wire/Vocabulary.kt",
+    help="Kotlin projection destination",
+)
 parser.add_argument(
     "--check",
     action="store_true",
     help="fail instead of writing when the committed projection is stale",
 )
 options = parser.parse_args()
+
+contract = json.loads(
+    (options.spec_dir.resolve() / "contract.json").read_text(encoding="utf-8")
+)
+OUT = options.output.resolve()
 
 
 def kt_set(values):

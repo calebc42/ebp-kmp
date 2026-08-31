@@ -243,6 +243,25 @@ class SpecValidatorCompletenessTest {
     }
 
     @Test
+    fun tabSelectorIsControlledAndChildless() {
+        fun selector(items: JsonArray, selected: JsonElement) = node(
+            "tab_selector",
+            "items" to items,
+            "selected" to selected,
+            "on_change" to remote(),
+        )
+        val item = buildJsonObject { put("label", "Preview") }
+        rejects(selector(JsonArray(emptyList()), JsonPrimitive(0)), "non-empty")
+        rejects(selector(JsonArray(listOf(item)), JsonPrimitive(1)), "index")
+        rejects(selector(JsonArray(listOf(item)), JsonPrimitive("0")), "index")
+        rejects(selector(
+            JsonArray(listOf(buildJsonObject { put("icon", "preview") })),
+            JsonPrimitive(0),
+        ), "label")
+        accepts(selector(JsonArray(listOf(item)), JsonPrimitive(0)))
+    }
+
+    @Test
     fun tableRowRules() {
         fun table(vararg rows: JsonObject) =
             node("table", "rows" to JsonArray(rows.toList()))

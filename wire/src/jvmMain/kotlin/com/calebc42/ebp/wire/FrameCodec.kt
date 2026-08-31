@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // EBP 3 framing, Companion side. Implements ebp/SPEC.md sections 6 and 4.1.
-// The Kotlin twin of emacs/ebp.el's decoder: same error taxonomy, same
+// The Kotlin twin of the canonical ebp.el decoder: same error taxonomy, same
 // chunk-size independence, verified by the same goldens/wire corpus.
 package com.calebc42.ebp.wire
 

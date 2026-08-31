@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// GENERATED from ebp/contract.json (format 10,
+// GENERATED from ebp/contract.json (format 11,
 // spec 3.1.0-draft) by tools/gen-vocabulary.py — DO NOT EDIT.
 // VocabularyDriftTest re-reads the contract and fails on any disagreement.
 package com.calebc42.ebp.wire
@@ -126,7 +126,7 @@ data class TextInputContract(
     val logicalValueExcludes: List<String>,
 )
 
-const val CONTRACT_FORMAT = 10
+const val CONTRACT_FORMAT = 11
 const val PROTOCOL_VERSION = 3
 const val SPEC_VERSION = "3.1.0-draft"
 
@@ -172,6 +172,7 @@ val DEFAULT_NODE_SEMANTICS: Map<String, DefaultSemanticRow> = mapOf(
     "switch" to DefaultSemanticRow(role = "switch", enabledMember = "enabled", checkedMember = "checked", checkedDefault = false),
     "enum_list" to DefaultSemanticRow(role = "selection_group", enabledMember = "enabled", selectionMember = "value"),
     "tabs" to DefaultSemanticRow(role = "tab_group", selectionMember = "initial", selectionDefaultIndex = 0),
+    "tab_selector" to DefaultSemanticRow(role = "tab_group", selectionMember = "selected"),
     "segmented_button" to DefaultSemanticRow(role = "tab_group", enabledMember = "enabled", selectionMember = "value"),
     "slider" to DefaultSemanticRow(role = "slider", enabledMember = "enabled", progressValueMember = "value", progressMinMember = "min", progressMaxMember = "max", progressValueDefaultsToMin = true, progressMin = 0.0, progressMax = 1.0),
     "card" to DefaultSemanticRow(role = "button", roleConditionMember = "on_tap", customActionsFrom = listOf("swipe_start", "swipe_end")),
@@ -226,6 +227,7 @@ val ENUMS: Map<String, Set<String>> = mapOf(
     "enum_list.variant" to setOf("chips", "radio"),
     "scaffold.sheet_state" to setOf("hidden", "partial", "expanded"),
     "tabs.style" to setOf("primary", "secondary"),
+    "tab_selector.style" to setOf("primary", "secondary"),
     "tab_item.icon_position" to setOf("above", "leading"),
     "scaffold.floating_toolbar_orientation" to setOf("horizontal", "vertical"),
     "scaffold.floating_toolbar_placement" to setOf("bottom_center", "bottom_start", "bottom_end", "center_start", "center_end"),
@@ -346,6 +348,7 @@ val NODE_SCHEMA: Map<String, NodeRow> = mapOf(
     "collapsible" to NodeRow(setOf("id", "header", "children"), setOf("collapsed", "on_long_tap", "swipe_start", "swipe_end")),
     "reorderable_list" to NodeRow(setOf("items"), setOf("on_reorder")),
     "tabs" to NodeRow(setOf("items", "children"), setOf("initial", "scrollable", "pager_only", "on_change", "id", "style", "indicator")),
+    "tab_selector" to NodeRow(setOf("items", "selected", "on_change"), setOf("scrollable", "id", "style", "indicator")),
     "table" to NodeRow(setOf("rows"), setOf("aligns", "on_add_row", "on_add_col")),
     "button" to NodeRow(setOf("label", "on_tap"), setOf("icon", "variant", "enabled", "size", "shape", "animate_shape", "checked", "on_change", "expanded", "checked_shape", "shape_role", "checked_icon", "color")),
     "icon_button" to NodeRow(setOf("icon", "on_tap"), setOf("content_description", "badge", "enabled", "variant", "checked", "on_change", "checked_icon", "size", "shape", "width_mode", "color")),

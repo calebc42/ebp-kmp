@@ -1,5 +1,3 @@
-// POC 3 keeps the proven wire/app pair intact and grows architecture-template
-// style core modules around the future standalone kotlin-ebp library.
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
 
 pluginManagement {
@@ -15,17 +13,8 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "ebp-companion"
+// Keep the build root distinct from its published :ebp-kmp project so
+// Gradle's type-safe root and child accessors cannot collide.
+rootProject.name = "ebp-kmp-workspace"
 include(":ebp-kmp")
 include(":wire")
-include(":app")
-include(":core:model")
-include(":core:database")
-include(":core:ebp-store")
-include(":core:data")
-include(":core:navigation")
-include(":core:testing")
-include(":renderer:model")
-include(":renderer:compose")
-include(":renderer:jetpacs")
-include(":renderer:material3")

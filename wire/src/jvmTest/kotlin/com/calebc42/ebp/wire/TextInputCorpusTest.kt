@@ -12,18 +12,20 @@ import org.junit.Test
 
 /** Permanent seed-20260828 cross-language conformance and normalization rail. */
 class TextInputCorpusTest {
-    private val ebpDir = File(
-        System.getProperty("ebp.dir") ?: error("ebp.dir system property not set"),
+    private val specificationDir = File(
+        System.getProperty("ebp.dir")
+            ?: error("ebp.dir system property not set"),
     )
 
     @Test
     fun deterministicTenThousandCaseCorpusMatchesReceiverAndNormalizer() {
-        val root = ebpDir.parentFile
-        val corpus = File.createTempFile("jetpacs-text-input-", ".jsonl")
+        val corpus = File.createTempFile("ebp-text-input-", ".jsonl")
         try {
             val process = ProcessBuilder(
                 "python3",
-                root.resolve("test/generate-text-input-corpus.py").absolutePath,
+                specificationDir.resolve(
+                    "conformance/generate-text-input-corpus.py",
+                ).absolutePath,
                 corpus.absolutePath,
             ).redirectErrorStream(true).start()
             val output = process.inputStream.bufferedReader().readText()

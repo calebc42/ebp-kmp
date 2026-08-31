@@ -36,7 +36,8 @@ kotlin {
 // property must ride `jvmTest` or five conformance suites lose their fixtures.
 tasks.named<Test>("jvmTest") {
     useJUnit()
-    // The conformance suite reads the ebp submodule's goldens.
+    // A standalone checkout uses sibling ../ebp. The specification owns the
+    // implementation-neutral corpus generator as well as normative fixtures.
     systemProperty("ebp.dir", rootDir.resolve("../ebp").canonicalPath)
 }
 

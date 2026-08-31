@@ -474,17 +474,18 @@ object SpecValidator {
         path: String,
         ctx: Ctx,
         siblingKeys: MutableMap<String, String>,
+        parentType: String?,
     ) {
         when (value) {
             is JsonArray ->
                 for (i in value.indices)
-                    walkValue(value[i], "$path[$i]", ctx, siblingKeys)
+                    walkValue(value[i], "$path[$i]", ctx, siblingKeys, parentType)
             is JsonObject ->
                 if ("t" in value) {
                     // Intermediate schema objects do not create presentation
                     // parents. The first Nodes reached through them are all
                     // siblings of the nearest enclosing Node (SPEC 16.1).
-                    walkNode(value, path, ctx, siblingKeys)
+                    walkNode(value, path, ctx, siblingKeys, parentType)
                 } else {
                     for ((key, child) in value) {
                         if (key in OPAQUE_NODE_WALK_MEMBERS) Unit
@@ -492,7 +493,13 @@ object SpecValidator {
                             validateAction(child, "$path.$key", key, ctx)
                         else if ((key == "swipe_start" || key == "swipe_end") && child is JsonObject)
                             validateSwipeSide(child, "$path.$key", key, ctx)
-                        else walkValue(child, "$path.$key", ctx, siblingKeys)
+                        else walkValue(
+                            child,
+                            "$path.$key",
+                            ctx,
+                            siblingKeys,
+                            parentType,
+                        )
                     }
                 }
             else -> Unit // scalars carry no schema
@@ -504,6 +511,7 @@ object SpecValidator {
         path: String,
         ctx: Ctx,
         siblingKeys: MutableMap<String, String>? = null,
+        parentType: String? = null,
     ) {
         // SPEC 4.5: at most 10,000 nodes in one surface snapshot; count
         // before descending so an over-limit tree rejects, not renders.
@@ -518,7 +526,7 @@ object SpecValidator {
         }
         try {
             val semanticCollection = validateSemantics(node, path, ctx)
-            validateNode(node, path, ctx)
+            validateNode(node, path, ctx, parentType)
             node.stringOrNull("key")?.let { key ->
                 val first = siblingKeys?.putIfAbsent(key, path)
                 if (first != null)
@@ -592,6 +600,7 @@ object SpecValidator {
                                     "$path.children[$index]",
                                     ctx,
                                     childSiblingKeys,
+                                    t,
                                 )
                             }
                         }
@@ -608,6 +617,7 @@ object SpecValidator {
                                     content,
                                     "$path.variants[$index].content",
                                     ctx,
+                                    parentType = t,
                                 )
                             }
                         }
@@ -616,6 +626,12 @@ object SpecValidator {
                             "$path.$key",
                             ctx,
                             childSiblingKeys,
+                            // An unsupported node degrades to its descendants;
+                            // it cannot grant renderer-owned parent behavior.
+                            // Passing its raw discriminator here would let an
+                            // unadvertised lazy_column satisfy a sticky-child
+                            // rule even though it cannot render as one.
+                            if (known) t else null,
                         )
                     }
                 }
@@ -1006,7 +1022,12 @@ object SpecValidator {
         }
     }
 
-    private fun validateNode(node: JsonObject, path: String, ctx: Ctx) {
+    private fun validateNode(
+        node: JsonObject,
+        path: String,
+        ctx: Ctx,
+        parentType: String?,
+    ) {
         val t = node.stringOrNull("t")
             ?: throw ContentInvalid(path, "node discriminator t must be a string")
         // SPEC 16.1/16.3: universal identity attributes keep their declared
@@ -1061,6 +1082,9 @@ object SpecValidator {
         // assume every defaulting read was already type-checked here.
         for (member in row.required + row.optional)
             if (member in node) checkScalarFieldType(t, member, node, path)
+        ctx.nodeVocabulary.trueRequiresParent[t]?.let { rule ->
+            validateTrueRequiresParent(node, path, parentType, rule)
+        }
         when (t) {
             "text_input" -> {
                 val value = node["value"]
@@ -1273,6 +1297,7 @@ object SpecValidator {
                         "image url must be https or a supported base64 data:image")
             }
             "tabs" -> validateTabs(node, path)
+            "tab_selector" -> validateTabSelector(node, path)
             "table" -> validateTable(node, path, ctx)
             "chart" -> validateChart(node, path, ctx)
             "canvas" -> validateCanvas(node, path, ctx)
@@ -1287,6 +1312,9 @@ object SpecValidator {
                 if ("toolbar" in node)
                     validateToolbar(node["toolbar"], "$path.toolbar", hasDocument)
             }
+        }
+        ctx.nodeVocabulary.selectionOptions[t]?.let { rule ->
+            validateSelectionOptions(node, path, rule)
         }
         ctx.nodeVocabulary.atLeastOneNonEmpty[t]?.let { members ->
             if (members.none { member -> node.stringOr(member).isNotEmpty() })
@@ -1307,6 +1335,143 @@ object SpecValidator {
             val id = node.stringOrNull("id")
                 ?: throw ContentInvalid(path, "$t requires an id")
             ctx.statefuls[id] = node
+        }
+    }
+
+    /**
+     * Validate a renderer-installed, controlled single-selection contract.
+     * The rule carries every member name; this generic wire code intentionally
+     * does not know the extension or node type that requested it.
+     */
+    private fun validateSelectionOptions(
+        node: JsonObject,
+        path: String,
+        rule: SelectionOptionsRule,
+    ) {
+        val optionsPath = "$path.${rule.optionsMember}"
+        val options = node.arrOrNull(rule.optionsMember)
+            ?: throw ContentInvalid(optionsPath, "must be an array")
+        if (options.isEmpty())
+            throw ContentInvalid(optionsPath, "must be non-empty")
+
+        val baseMembers = setOf(rule.labelMember, rule.valueMember)
+        val requiredMembers = baseMembers + rule.requiredOptionMembers.keys
+        val optionMembers = requiredMembers + rule.optionalOptionMembers.keys
+        val values = mutableSetOf<String>()
+        for (index in options.indices) {
+            val optionPath = "$optionsPath[$index]"
+            val option = options[index] as? JsonObject
+                ?: throw ContentInvalid(optionPath, "must be an object")
+            option.keys.firstOrNull { it !in optionMembers }?.let { member ->
+                throw ContentInvalid("$optionPath.$member", "unknown option member")
+            }
+            if (!option.keys.containsAll(baseMembers))
+                throw ContentInvalid(
+                    optionPath,
+                    "needs ${rule.labelMember} and ${rule.valueMember}",
+                )
+            requiredMembers.firstOrNull { it !in option }?.let { member ->
+                throw ContentInvalid("$optionPath.$member", "is required")
+            }
+            val label = option.stringOrNull(rule.labelMember)
+            if (label.isNullOrEmpty())
+                throw ContentInvalid(
+                    "$optionPath.${rule.labelMember}",
+                    "must be a non-empty string",
+                )
+            val value = option.stringOrNull(rule.valueMember)
+            if (value.isNullOrEmpty())
+                throw ContentInvalid(
+                    "$optionPath.${rule.valueMember}",
+                    "must be a non-empty string",
+                )
+            if (!values.add(value))
+                throw ContentInvalid(
+                    "$optionPath.${rule.valueMember}",
+                    "duplicate option value",
+                )
+            for ((member, fieldType) in
+                rule.requiredOptionMembers + rule.optionalOptionMembers) {
+                if (member in option) {
+                    validateSelectionOptionMember(
+                        option.getValue(member),
+                        "$optionPath.$member",
+                        fieldType,
+                    )
+                }
+            }
+        }
+
+        if (rule.selectionMember in node) {
+            val selectionPath = "$path.${rule.selectionMember}"
+            val selected = node.stringOrNull(rule.selectionMember)
+                ?: throw ContentInvalid(selectionPath, "must be a string")
+            if (selected !in values)
+                throw ContentInvalid(selectionPath, "selected value not in options")
+        }
+    }
+
+    /** Type-check one scalar member declared by renderer-owned option data. */
+    private fun validateSelectionOptionMember(
+        value: JsonElement,
+        path: String,
+        fieldType: String,
+    ) {
+        fun invalid(want: String): Nothing =
+            throw ContentInvalid(path, "must be $want")
+        when (fieldType) {
+            "boolean" -> {
+                val primitive = value as? kotlinx.serialization.json.JsonPrimitive
+                if (primitive == null || primitive.isString ||
+                    primitive.content.toBooleanStrictOrNull() == null) {
+                    invalid("a boolean")
+                }
+            }
+            "finite-number" -> {
+                val number = value.asDoubleOrNull()
+                if (number == null || !number.isFinite()) invalid("a finite number")
+            }
+            "integer" ->
+                if (integralLongOrNull(value) == null) invalid("an integer")
+            "integer-1-6" -> {
+                val number = integralLongOrNull(value)
+                if (number == null || number !in 1L..6L) invalid("an integer 1..6")
+            }
+            "non-empty-string" ->
+                if (value.asStringOrNull().isNullOrEmpty()) {
+                    invalid("a non-empty string")
+                }
+            "non-negative-integer" -> {
+                val number = integralLongOrNull(value)
+                if (number == null || number < 0L) invalid("a non-negative integer")
+            }
+            "positive-integer" -> {
+                val number = integralLongOrNull(value)
+                if (number == null || number < 1L) invalid("a positive integer")
+            }
+            "string" ->
+                if (value.asStringOrNull() == null) invalid("a string")
+            else -> error("unsupported selection option member type $fieldType")
+        }
+    }
+
+    /** Validate a renderer-owned optional boolean with a direct-parent gate. */
+    private fun validateTrueRequiresParent(
+        node: JsonObject,
+        path: String,
+        parentType: String?,
+        rule: TrueRequiresParentRule,
+    ) {
+        if (rule.member !in node) return
+        val memberPath = "$path.${rule.member}"
+        val enabled = node.boolOrNull(rule.member)
+            ?: throw ContentInvalid(memberPath, "must be a boolean")
+        if (enabled && parentType !in rule.parentTypes) {
+            throw ContentInvalid(
+                memberPath,
+                "true requires a direct parent of type " +
+                    rule.parentTypes.sorted().joinToString(" or "),
+            )
         }
     }
 
@@ -1492,6 +1657,35 @@ object SpecValidator {
             if (init == null || init != Math.floor(init) ||
                 init < 0 || init >= items.size)
                 throw ContentInvalid("$path.initial", "must index the item count")
+        }
+    }
+
+    /** SPEC 17.3: a controlled tab selector has no children; its authored
+     * selected index names one non-empty TabItem and changes only by snapshot. */
+    private fun validateTabSelector(node: JsonObject, path: String) {
+        val items = node.arrOrNull("items")
+            ?: throw ContentInvalid("$path.items", "items must be an array")
+        if (items.isEmpty())
+            throw ContentInvalid("$path.items", "must be non-empty")
+        for (i in items.indices) {
+            val item = items[i] as? JsonObject
+                ?: throw ContentInvalid("$path.items[$i]", "must be a TabItem object")
+            if (item.stringOrNull("label") == null)
+                throw ContentInvalid("$path.items[$i].label", "TabItem label must be a string")
+            if ("selected_content" in item && "content" !in item)
+                throw ContentInvalid("$path.items[$i]", "selected_content needs content")
+            for (member in listOf("content", "selected_content")) {
+                if (member in item && item.objOrNull(member)?.stringOrNull("t") == null)
+                    throw ContentInvalid("$path.items[$i].$member", "must be a node")
+            }
+        }
+        val selected = integralLongOrNull(node["selected"])
+        if (selected == null || selected < 0 || selected >= items.size)
+            throw ContentInvalid("$path.selected", "must index the item count")
+        node.objOrNull("indicator")?.let { indicator ->
+            val kind = indicator.stringOrNull("kind")
+            if (kind != "underline" && kind != "outline")
+                throw ContentInvalid("$path.indicator.kind", "must be underline or outline")
         }
     }
 

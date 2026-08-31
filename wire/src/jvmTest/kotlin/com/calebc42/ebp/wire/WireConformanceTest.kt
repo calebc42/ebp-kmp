@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// W2 conformance suite — the Kotlin twin of test/ebp-wire-test.el, driven by
+// W2 conformance suite — the Kotlin twin of ebp.el's wire suite, driven by
 // the same ebp corpus (SPEC 24.5-24.6): the 9.3 known-answer vector, every
 // goldens/wire fixture at whole/1-octet/7-octet chunkings against the
 // manifest's expected outcome, encoder byte syntax, and handshake params
