@@ -55,7 +55,15 @@ class WidgetsGoldenReplayTest {
             val obj = Json.parseToJsonElement(json) as JsonObject
             val doc = if ("action" in obj || "builtin" in obj) wrapAction(obj) else obj
             try {
-                SpecValidator.validateSurfaceSpec(doc, "widgets:$idx")
+                // The corpus includes the positive `when_offline: wake`
+                // authoring witness. Replay the positive vocabulary corpus
+                // under the grant that makes that row legal; denial without
+                // the current grant has dedicated validator/engine tests.
+                SpecValidator.validateSurfaceSpec(
+                    doc,
+                    "widgets:$idx",
+                    offlineWakeGranted = true,
+                )
             } catch (e: ContentInvalid) {
                 fail("widgets.golden line $idx rejected: ${e.reason} at ${e.path}")
             }

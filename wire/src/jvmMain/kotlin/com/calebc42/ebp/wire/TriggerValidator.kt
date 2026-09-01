@@ -22,6 +22,13 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
+/** One explicit SPEC 21.4 approval for a sensitive source and one sink kind. */
+data class SensitiveSubstitutionApproval(
+    val sourceType: String,
+    /** `notification` or `cap:<capability-name>`. */
+    val sinkKind: String,
+)
+
 /** The device facts a trigger set is validated against (from the report). */
 data class TriggerCaps(
     val triggerTypes: Set<String>,
@@ -29,9 +36,14 @@ data class TriggerCaps(
     val trackableStateTypes: Set<String>,
     val triggerCaps: Set<String>,
     val maxResponses: Int,
-    /** SPEC 21.4: whether the user approved substituting sensitive-source
-     * (sms/call/calendar) data into an on_fire sink. Default deny. */
-    val sensitiveSubstitutionApproved: Boolean = false,
+    /** SPEC 21.4 source-to-sink approvals. A blanket approval is deliberately
+     * unrepresentable; every absent pair defaults to deny. */
+    val sensitiveSubstitutionApprovals: Set<SensitiveSubstitutionApproval> = emptySet(),
+    /** Whether queued sms/call payloads use a platform-keystore-backed,
+     * identity-scoped encrypted-at-rest store. */
+    val sensitiveQueueEncrypted: Boolean = false,
+    /** SPEC 5.3/21.1: whether this session may author a wake-backed trigger. */
+    val offlineWakeGranted: Boolean = false,
 )
 
 object TriggerValidator {
@@ -44,14 +56,22 @@ object TriggerValidator {
     // SPEC 21.4: sources whose data reaching a sink needs explicit approval.
     private val SENSITIVE = setOf("sms.received", "call.state", "calendar.event")
     // SPEC 21.5: sms.received/call.state fire payloads MUST be keystore-encrypted
-    // at rest if queued. Until that encryption seam exists, a durable policy is
-    // refused for them so a sensitive payload can never land plaintext in the
-    // durable queue (drop, RECOMMENDED anyway, is the only accepted policy).
+    // at rest if queued. Admission therefore depends on the host's explicit
+    // encrypted-store attestation above; the default remains fail closed.
     private val ENCRYPTED_IF_QUEUED = setOf("sms.received", "call.state")
     // SPEC 21.4: caps that MUST NOT appear in trigger_caps / on_fire (they are
     // interactive, unbounded, or return non-{} results).
-    private val FORBIDDEN_TRIGGER_CAPS = setOf("settings.open", "apps.list",
-        "clipboard.read", "shortcut.pin", "shortcuts.set", "trigger.fire")
+    private val FORBIDDEN_TRIGGER_CAPS = setOf(
+        "settings.open",
+        "app.launch",
+        "apps.list",
+        "shortcut.pin",
+        "shortcuts.set",
+        "volume.set",
+        "clipboard.read",
+        "state.get",
+        "trigger.fire",
+    )
 
     // ------------------------------------------------------------- entrypoint
 
@@ -77,6 +97,18 @@ object TriggerValidator {
         }
         return out
     }
+
+    /** Validate and normalize one state.get predicate list against the report. */
+    fun validateStatePredicates(
+        predicates: JsonArray,
+        stateTypes: Set<String>,
+        path: String = "when",
+    ): JsonArray = normPredicates(
+        predicates,
+        path,
+        stateTypes,
+        allowTimeWindow = true,
+    )
 
     // --------------------------------------------------------- one trigger
 
@@ -105,8 +137,10 @@ object TriggerValidator {
             t.stringOrNull("policy") ?: throw ContentInvalid("$path.policy", "must be a string")
         else "drop"
         if (policy !in POLICIES) throw ContentInvalid("$path.policy", "not a policy")
+        if (policy == "wake" && !caps.offlineWakeGranted)
+            throw ContentInvalid("$path.policy", "wake requires the offline.wake grant")
         val durable = policy == "queue" || policy == "wake"
-        if (durable && type in ENCRYPTED_IF_QUEUED)
+        if (durable && type in ENCRYPTED_IF_QUEUED && !caps.sensitiveQueueEncrypted)
             throw ContentInvalid("$path.policy", "sensitive type requires policy drop")
         // SPEC 21.1: ttl_s REQUIRED for queue/wake, forbidden for drop.
         val hasTtl = "ttl_s" in t
@@ -123,16 +157,22 @@ object TriggerValidator {
             t.arrOrNull("on_fire") ?: throw ContentInvalid("$path.on_fire", "must be an array")
         else JsonArray(emptyList())
         val normOnFire = normOnFire(onFire, "$path.on_fire", caps)
-        // SPEC 21.4 (amendment #42): routing sensitive-source data into a sink
-        // needs approval, which is per (source type, sink kind) and default-deny.
-        // The current seam is a single conservative boolean (deny unless the
-        // host approved), which is safe but coarse — when an approval UI lands,
-        // it should carry a set of approved (source, sink) pairs, not a blanket
-        // flag. Today's reference never sets it, so sensitive substitution is
-        // always rejected.
-        if (type in SENSITIVE && !caps.sensitiveSubstitutionApproved &&
-            Substitution.referencesData(normOnFire))
-            throw ContentInvalid("$path.on_fire", "sensitive substitution requires approval")
+        // SPEC 21.4: approvals are per (source type, sink kind), default deny.
+        if (type in SENSITIVE) normOnFire.forEachIndexed { index, element ->
+            if (!Substitution.referencesData(element)) return@forEachIndexed
+            val entry = element as JsonObject
+            val sink = if ("notify" in entry) {
+                "notification"
+            } else {
+                "cap:${entry.reqString("cap")}"
+            }
+            val approval = SensitiveSubstitutionApproval(type, sink)
+            if (approval !in caps.sensitiveSubstitutionApprovals)
+                throw ContentInvalid(
+                    "$path.on_fire[$index]",
+                    "sensitive substitution requires approval for $type -> $sink",
+                )
+        }
 
         // Canonical normalized entry: fixed members always present, the three
         // conditional members present only when they apply/were supplied. The

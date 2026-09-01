@@ -136,6 +136,28 @@ class NotificationSurfaceTest {
             put("label", "Snooze")
             putJsonObject("on_tap") { put("action", "task.snooze"); put("when_offline", "drop") }
         })).status)
+
+        val wake = action(buildJsonObject {
+            put("label", "Wake")
+            putJsonObject("on_tap") {
+                put("action", "task.wake")
+                put("when_offline", "wake")
+                put("ttl_s", 60)
+            }
+        })
+        rejects(wake, "offline.wake")
+        assertEquals(
+            "applied",
+            store().update(
+                "notification:agenda",
+                1,
+                wake,
+                null,
+                null,
+                null,
+                offlineWakeGranted = true,
+            ).status,
+        )
     }
 
     @Test

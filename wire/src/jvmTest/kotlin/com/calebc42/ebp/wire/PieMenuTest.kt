@@ -146,14 +146,14 @@ class PieMenuTest {
         val engine = engine(out, presented)
         // A category with both items and on_tap.
         show(engine, "a", buildJsonArray {
-            add(leaf("x").with("items", JsonArray(emptyList())))
+            add(leaf("demo.x").with("items", JsonArray(emptyList())))
         })
         // A queued (not drop) descriptor.
         show(engine, "b", buildJsonArray {
             addJsonObject {
                 put("label", "c")
                 putJsonObject("on_tap") {
-                    put("action", "x")
+                    put("action", "demo.x")
                     put("when_offline", "queue")
                     put("ttl_s", 60)
                 }
@@ -164,13 +164,24 @@ class PieMenuTest {
             addJsonObject {
                 put("label", "c")
                 putJsonObject("on_tap") {
-                    put("action", "x")
+                    put("action", "demo.x")
                     putJsonObject("args") { put("menu_id", "sneaky") }
                 }
             }
         })
+        // open_surface is valid only after an app-surface occurrence passes
+        // sizing and durable admission; a pie selection has no app target.
+        show(engine, "open", buildJsonArray {
+            addJsonObject {
+                put("label", "c")
+                putJsonObject("on_tap") {
+                    put("action", "demo.x")
+                    put("open_surface", "app:detail")
+                }
+            }
+        })
         // Eleven categories.
-        val many = buildJsonArray { repeat(11) { add(leaf("x")) } }
+        val many = buildJsonArray { repeat(11) { add(leaf("demo.x")) } }
         show(engine, "d", many)
         assertTrue(presented.isEmpty())
         // SPEC 18.3 (amendment #132): each drop is REPORTED, not silent — an
@@ -180,7 +191,7 @@ class PieMenuTest {
                 it.objOrNull("params")?.objOrNull("data")
                     ?.stringOrNull("reason") == "pie-menu-invalid"
         }
-        assertEquals(4, invalid.size)
+        assertEquals(5, invalid.size)
         val params = invalid.first().reqObj("params")
         assertEquals(1201L, params.reqLong("code"))
         assertEquals("content-invalid", params.reqObj("data").reqString("kind"))
@@ -193,7 +204,7 @@ class PieMenuTest {
         val out = mutableListOf<JsonObject>()
         val presented = mutableListOf<Pair<String, JsonObject?>>()
         val engine = engine(out, presented)
-        show(engine, "has space", buildJsonArray { add(leaf("x")) })
+        show(engine, "has space", buildJsonArray { add(leaf("demo.x")) })
         assertTrue(presented.isEmpty())
         val invalid = out.single {
             it.stringOrNull("method") == "log.error" &&
@@ -209,14 +220,14 @@ class PieMenuTest {
         val out = mutableListOf<JsonObject>()
         val presented = mutableListOf<Pair<String, JsonObject?>>()
         val engine = engine(out, presented, maxPie = 1)
-        show(engine, "m1", buildJsonArray { add(leaf("a")) })
+        show(engine, "m1", buildJsonArray { add(leaf("demo.a")) })
         // A second distinct id over the limit: dropped + log.error.
-        show(engine, "m2", buildJsonArray { add(leaf("b")) })
+        show(engine, "m2", buildJsonArray { add(leaf("demo.b")) })
         assertEquals(1, presented.size)
         val err = out.last { it.stringOrNull("method") == "log.error" }.reqObj("params")
         assertEquals("pie-menu-limit", err.reqObj("data").reqString("reason"))
         // Replacing the existing id stays legal at the limit.
-        show(engine, "m1", buildJsonArray { add(leaf("c")) })
+        show(engine, "m1", buildJsonArray { add(leaf("demo.c")) })
         assertEquals("m1", presented.last().first)
         assertEquals(2, presented.size)
     }
@@ -226,8 +237,8 @@ class PieMenuTest {
         val out = mutableListOf<JsonObject>()
         val presented = mutableListOf<Pair<String, JsonObject?>>()
         val engine = engine(out, presented, maxPie = 4)
-        show(engine, "a", buildJsonArray { add(leaf("x")) })
-        show(engine, "b", buildJsonArray { add(leaf("y")) })
+        show(engine, "a", buildJsonArray { add(leaf("demo.x")) })
+        show(engine, "b", buildJsonArray { add(leaf("demo.y")) })
         engine.close("transport closed")
         assertEquals(listOf("a", "b"),
             presented.filter { it.second == null }.map { it.first })
@@ -238,7 +249,7 @@ class PieMenuTest {
         val out = mutableListOf<JsonObject>()
         val presented = mutableListOf<Pair<String, JsonObject?>>()
         val engine = engine(out, presented, grant = false)
-        show(engine, "m", buildJsonArray { add(leaf("x")) })
+        show(engine, "m", buildJsonArray { add(leaf("demo.x")) })
         assertTrue(presented.isEmpty())
     }
 }

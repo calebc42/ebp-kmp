@@ -19,12 +19,20 @@ import org.junit.Test
 class ReminderTest {
 
     private fun engine(out: MutableList<JsonObject>, maxReminders: Long = 256,
-                       grant: Boolean = true): CompanionEngine {
-        val wants = if (grant) listOf("reminders.owner") else emptyList()
+                       grant: Boolean = true,
+                       offlineWakeGranted: Boolean = false): CompanionEngine {
+        val wants = if (grant) {
+            listOf("reminders.owner") +
+                if (offlineWakeGranted) listOf("offline.wake") else emptyList()
+        } else {
+            emptyList()
+        }
+        val supported = setOf("reminders.owner") +
+            if (offlineWakeGranted) setOf("offline.wake") else emptySet()
         val engine = CompanionEngine(CompanionConfig(
             serverName = "kat", serverVersion = "1",
             pairings = mapOf(katPid to katToken),
-            supportedCapabilities = setOf("reminders.owner"),
+            supportedCapabilities = supported,
             surfaceProfiles = buildJsonObject {
                 putJsonObject("app") {
                     put("node_types", JsonArray(listOf("text").map(::JsonPrimitive)))
@@ -118,6 +126,38 @@ class ReminderTest {
                 put("action", "a.b")
                 put("capture_fields", JsonArray(listOf(JsonPrimitive("note"))))
             })))
+        assertEquals("not available without an app surface", reason(reminder("x", 1,
+            buildJsonObject {
+                put("action", "a.b")
+                put("open_surface", "app:agenda")
+            })))
+    }
+
+    @Test
+    fun wakeTapRequiresTheCurrentSessionGrant() {
+        val wake = reminder("wake", 1, buildJsonObject {
+            put("action", "agenda.wake")
+            put("when_offline", "wake")
+            put("ttl_s", 60)
+        })
+
+        val denied = mutableListOf<JsonObject>()
+        val deniedReply = set(engine(denied), denied, "org.a", wake)
+        assertEquals(
+            "wake requires the offline.wake grant",
+            deniedReply.reqObj("error").reqObj("data").reqString("reason"),
+        )
+
+        val allowed = mutableListOf<JsonObject>()
+        assertEquals(
+            1L,
+            set(
+                engine(allowed, offlineWakeGranted = true),
+                allowed,
+                "org.a",
+                wake,
+            ).reqObj("result").reqLong("count"),
+        )
     }
 
     @Test

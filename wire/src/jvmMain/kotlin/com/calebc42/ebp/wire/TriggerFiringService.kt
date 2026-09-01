@@ -59,6 +59,8 @@ class TriggerFiringService(
 ) {
     /** SPEC 21.3/21.7: current sample for a state type (gate/edge/window). */
     @Volatile var stateProvider: (String) -> JsonObject? = { null }
+    /** Host evaluation for predicates whose public sample omits filter detail. */
+    @Volatile var statePredicateProvider: (JsonObject) -> Boolean? = { null }
     /** SPEC 21.4: post a substituted local notification from an on_fire entry. */
     @Volatile var notifyListener: ((JsonObject) -> Unit)? = null
     /** SPEC 21.5: the time schedule changed (a set replaced time.* triggers) —
@@ -77,7 +79,8 @@ class TriggerFiringService(
     private val runtime = TriggerRuntime(
         store, { queue.effectiveNow() }, zone, { stateProvider(it) },
         emit = ::admit, onFire = ::executeOnFire, persistRecords = store::persistRecords,
-        bootGeneration = { bootGeneration() })
+        bootGeneration = { bootGeneration() },
+        predicateProvider = { statePredicateProvider(it) })
 
     // Live-session calls collected under the monitor, run after it is released.
     private val pending = ArrayList<() -> Unit>()

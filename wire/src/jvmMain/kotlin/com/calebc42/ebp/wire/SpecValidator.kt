@@ -78,6 +78,15 @@ private val INJECTED_MEMBERS: Map<String, Set<String>> = mapOf(
 private val CONFIRM_MEMBERS =
     setOf("text", "title", "icon", "confirm_label", "dismiss_label")
 
+/** Builtins whose meaning does not require a surface node, view, or dialog. */
+private val CONTEXTLESS_BUILTINS = setOf(
+    "surface.open",
+    "clipboard.copy",
+    "share.send",
+    "companion.settings.open",
+    "trigger.fire",
+)
+
 /** Contract-defined application-data members. Objects below these names are
  * values, not node positions, even when application data happens to contain
  * a member named `t`. This matches the sender/reference-validator walker. */
@@ -127,6 +136,10 @@ object SpecValidator {
         val maxNodes: Int = WireLimits.MAX_NODES_PER_SNAPSHOT,
         val maxNodeDepth: Int = WireLimits.MAX_NODE_DEPTH,
         val maxLazyItems: Int = WireLimits.MAX_CHILDREN_PER_NODE,
+        // SPEC 14.1: `wake` is valid only in a document received during a
+        // session that actually granted offline.wake. Configuration alone is
+        // insufficient authority for a newly received descriptor.
+        val offlineWakeGranted: Boolean = false,
     ) {
         val ids = mutableSetOf<String>()
         val statefuls = mutableMapOf<String, JsonObject>()
@@ -148,6 +161,110 @@ object SpecValidator {
         var nodeDepth = 0
     }
 
+    /**
+     * Validate a remote ActionDescriptor that is persisted outside a surface,
+     * such as a launcher shortcut. There is no node tree from which to capture
+     * fields, and [injectedMembers] are supplied by the platform occurrence.
+     */
+    fun validateContextlessRemoteAction(
+        descriptor: JsonObject,
+        path: String,
+        injectedMembers: Set<String> = emptySet(),
+        offlineWakeGranted: Boolean = false,
+    ) {
+        if ("action" !in descriptor || "builtin" in descriptor)
+            throw ContentInvalid(path, "must be a remote ActionDescriptor")
+        validateContextlessAction(
+            descriptor,
+            path,
+            injectedMembers,
+            offlineWakeGranted = offlineWakeGranted,
+        )
+    }
+
+    /**
+     * Validate an ActionDescriptor persisted in a context-less platform slot,
+     * such as a Quick Settings tile. Builtins that need a node, view, or
+     * dialog are invalid even if another profile advertises them.
+     */
+    fun validateContextlessAction(
+        descriptor: JsonObject,
+        path: String,
+        injectedMembers: Set<String> = emptySet(),
+        advertisedBuiltins: Set<String>? = null,
+        advertisedFeatures: Set<String>? = null,
+        offlineWakeGranted: Boolean = false,
+    ) {
+        if ("capture_fields" in descriptor)
+            throw ContentInvalid("$path.capture_fields", "not available without a surface")
+        // SPEC 14.1: open_surface is interpreted only after an action from an
+        // admitted app target passes occurrence sizing and durable admission.
+        // A persisted platform slot has no app target or admitted revision.
+        if ("open_surface" in descriptor)
+            throw ContentInvalid("$path.open_surface", "not available without an app surface")
+        descriptor.objOrNull("args")?.let { args ->
+            for (member in injectedMembers) if (member in args)
+                throw ContentInvalid("$path.args.$member", "conflicts with injected value")
+        }
+        descriptor.stringOrNull("builtin")?.let { builtin ->
+            if (builtin !in CONTEXTLESS_BUILTINS)
+                throw ContentInvalid("$path.builtin", "builtin requires a surface or dialog")
+        }
+        val ctx = Ctx(
+            maxCaptureFields = 0,
+            maxChartPoints = Long.MAX_VALUE,
+            maxCanvasOps = Long.MAX_VALUE,
+            maxRichSpans = Long.MAX_VALUE,
+            maxTableCells = Long.MAX_VALUE,
+            advertisedTypes = null,
+            advertisedBuiltins = advertisedBuiltins,
+            advertisedFeatures = advertisedFeatures,
+            nodeVocabulary = EBP_NODE_VOCABULARY,
+            offlineWakeGranted = offlineWakeGranted,
+        )
+        validateAction(descriptor, path, "contextless", ctx)
+    }
+
+    /** Validate the exact SPEC 13.4 `tile:*` SurfaceSpec variant. */
+    fun validateTileSpec(
+        spec: JsonElement?,
+        path: String = "spec",
+        advertisedBuiltins: Set<String>? = null,
+        advertisedFeatures: Set<String>? = null,
+        offlineWakeGranted: Boolean = false,
+    ) {
+        val tile = spec as? JsonObject
+            ?: throw ContentInvalid(path, "must be an object")
+        val allowed = setOf("label", "icon", "subtitle", "active", "on_tap")
+        for (member in tile.keys) if (member !in allowed)
+            throw ContentInvalid("$path.$member", "unknown tile member")
+        if (tile.stringOrNull("label") == null)
+            throw ContentInvalid("$path.label", "must be a string")
+        if ("subtitle" in tile && tile.stringOrNull("subtitle") == null)
+            throw ContentInvalid("$path.subtitle", "must be a string")
+        if ("active" in tile && tile.boolOrNull("active") == null)
+            throw ContentInvalid("$path.active", "must be a boolean")
+        if ("icon" in tile) {
+            val icon = tile.stringOrNull("icon")
+            if (icon == null || !IDENTIFIER.matches(icon) ||
+                icon.toByteArray(Charsets.UTF_8).size > WireLimits.MAX_IDENTIFIER_OCTETS) {
+                throw ContentInvalid("$path.icon", "must be an identifier")
+            }
+        }
+        if ("on_tap" in tile) {
+            val action = tile.objOrNull("on_tap")
+                ?: throw ContentInvalid("$path.on_tap", "must be an ActionDescriptor")
+            validateContextlessAction(
+                action,
+                "$path.on_tap",
+                injectedMembers = setOf("tile"),
+                advertisedBuiltins = advertisedBuiltins,
+                advertisedFeatures = advertisedFeatures,
+                offlineWakeGranted = offlineWakeGranted,
+            )
+        }
+    }
+
     /** Validate one SurfaceSpec; returns the stateful nodes by ID. The chart/
      * canvas count limits default high so unit tests and the golden corpus
      * pass; the engine passes the profile's real §4.5 values. */
@@ -167,12 +284,25 @@ object SpecValidator {
         maxNodes: Int = WireLimits.MAX_NODES_PER_SNAPSHOT,
         maxNodeDepth: Int = WireLimits.MAX_NODE_DEPTH,
         maxLazyItems: Int = WireLimits.MAX_CHILDREN_PER_NODE,
+        offlineWakeGranted: Boolean = false,
     ): Map<String, JsonObject> {
         if (spec !is JsonObject) throw ContentInvalid(path, "spec must be an object")
-        val ctx = Ctx(maxCaptureFields, maxChartPoints, maxCanvasOps,
-            maxRichSpans, maxTableCells, advertisedTypes, advertisedBuiltins,
-            advertisedFeatures, advertisedMembers, nodeVocabulary,
-            maxNodes, maxNodeDepth, maxLazyItems)
+        val ctx = Ctx(
+            maxCaptureFields = maxCaptureFields,
+            maxChartPoints = maxChartPoints,
+            maxCanvasOps = maxCanvasOps,
+            maxRichSpans = maxRichSpans,
+            maxTableCells = maxTableCells,
+            advertisedTypes = advertisedTypes,
+            advertisedBuiltins = advertisedBuiltins,
+            advertisedFeatures = advertisedFeatures,
+            advertisedMembers = advertisedMembers,
+            nodeVocabulary = nodeVocabulary,
+            maxNodes = maxNodes,
+            maxNodeDepth = maxNodeDepth,
+            maxLazyItems = maxLazyItems,
+            offlineWakeGranted = offlineWakeGranted,
+        )
         if ("views" in spec) {
             val views = spec.objOrNull("views")
                 ?: throw ContentInvalid("$path.views", "views must be an object")
@@ -275,11 +405,13 @@ object SpecValidator {
                           advertisedTypes: Set<String>? = null,
                           advertisedBuiltins: Set<String>? = null,
                           advertisedFeatures: Set<String>? = null,
-                          nodeVocabulary: NodeVocabulary = EBP_NODE_VOCABULARY) {
+                          nodeVocabulary: NodeVocabulary = EBP_NODE_VOCABULARY,
+                          offlineWakeGranted: Boolean = false) {
         val statefuls = validateSurfaceSpec(staleSpec, "stale_spec",
             maxCaptureFields, maxChartPoints, maxCanvasOps,
             maxRichSpans, maxTableCells, advertisedTypes, advertisedBuiltins,
-            advertisedFeatures, nodeVocabulary)
+            advertisedFeatures, nodeVocabulary,
+            offlineWakeGranted = offlineWakeGranted)
         if (statefuls.isNotEmpty())
             throw ContentInvalid("stale_spec", "stateful nodes are prohibited in stale_spec")
         if (("views" in (staleSpec as JsonObject)) != primaryIsMultiView)
@@ -304,7 +436,8 @@ object SpecValidator {
                                  maxCanvasOps: Long = Long.MAX_VALUE,
                                  maxRichSpans: Long = Long.MAX_VALUE,
                                  maxTableCells: Long = Long.MAX_VALUE,
-                                 nodeVocabulary: NodeVocabulary = EBP_NODE_VOCABULARY) {
+                                 nodeVocabulary: NodeVocabulary = EBP_NODE_VOCABULARY,
+                                 offlineWakeGranted: Boolean = false) {
         if (spec !is JsonObject) throw ContentInvalid(path, "must be an object")
         if ("views" in spec) throw ContentInvalid(path, "multi-view prohibited")
         for (k in spec.keys) if (k != "body" && k != "meta")
@@ -318,11 +451,12 @@ object SpecValidator {
             maxRichSpans = maxRichSpans, maxTableCells = maxTableCells,
             advertisedTypes = advertisedTypes, advertisedBuiltins = advertisedBuiltins,
             advertisedFeatures = advertisedFeatures,
-            nodeVocabulary = nodeVocabulary)
+            nodeVocabulary = nodeVocabulary,
+            offlineWakeGranted = offlineWakeGranted)
         if ("meta" in spec) {
             val meta = spec.objOrNull("meta")
                 ?: throw ContentInvalid("$path.meta", "must be an object")
-            validateNotificationMeta(meta, "$path.meta")
+            validateNotificationMeta(meta, "$path.meta", offlineWakeGranted)
         }
     }
 
@@ -344,6 +478,7 @@ object SpecValidator {
         maxLazyItems: Int = MAX_WIDGET_LAZY_ITEMS,
         maxNodeDepth: Int = MAX_WIDGET_NODE_DEPTH,
         maxSizeVariants: Int = MAX_WIDGET_SIZE_VARIANTS,
+        offlineWakeGranted: Boolean = false,
     ) {
         val wrapper = spec as? JsonObject
             ?: throw ContentInvalid(path, "widget spec must be an object")
@@ -378,6 +513,7 @@ object SpecValidator {
             maxNodes = maxNodes,
             maxNodeDepth = maxNodeDepth,
             maxLazyItems = maxLazyItems,
+            offlineWakeGranted = offlineWakeGranted,
         )
         fun walkRoot(value: JsonElement?, rootPath: String) {
             val node = value as? JsonObject
@@ -443,7 +579,11 @@ object SpecValidator {
 
     private val PRIORITIES = setOf("min", "low", "default", "high", "max")
 
-    private fun validateNotificationMeta(meta: JsonObject, path: String) {
+    private fun validateNotificationMeta(
+        meta: JsonObject,
+        path: String,
+        offlineWakeGranted: Boolean,
+    ) {
         val allowed = setOf("channel", "ongoing", "category", "priority",
             "chronometer", "actions")
         for (k in meta.keys) if (k !in allowed)
@@ -481,12 +621,20 @@ object SpecValidator {
             for (i in actions.indices) {
                 val a = actions[i] as? JsonObject
                     ?: throw ContentInvalid("$path.actions[$i]", "must be an object")
-                validateNotificationAction(a, "$path.actions[$i]")
+                validateNotificationAction(
+                    a,
+                    "$path.actions[$i]",
+                    offlineWakeGranted,
+                )
             }
         }
     }
 
-    private fun validateNotificationAction(a: JsonObject, path: String) {
+    private fun validateNotificationAction(
+        a: JsonObject,
+        path: String,
+        offlineWakeGranted: Boolean,
+    ) {
         val allowed = setOf("label", "on_tap", "icon", "dismiss", "input")
         for (k in a.keys) if (k !in allowed)
             throw ContentInvalid("$path.$k", "unknown action member")
@@ -560,6 +708,11 @@ object SpecValidator {
                          else onTap.stringOrNull("when_offline")
             if (policy == null || policy !in OFFLINE_POLICIES)
                 throw ContentInvalid("$path.on_tap.when_offline", "unknown offline policy")
+            if (policy == "wake" && !offlineWakeGranted)
+                throw ContentInvalid(
+                    "$path.on_tap.when_offline",
+                    "wake requires the offline.wake grant",
+                )
             if (policy in setOf("queue", "wake") && "ttl_s" !in onTap)
                 throw ContentInvalid("$path.on_tap", "$policy requires ttl_s")
             if (policy == "drop" && ("ttl_s" in onTap || "dedupe" in onTap))
@@ -2233,6 +2386,11 @@ object SpecValidator {
                          else OFFLINE_DEFAULT
             if (policy == null || policy !in OFFLINE_POLICIES)
                 throw ContentInvalid("$path.when_offline", "unknown offline policy")
+            if (policy == "wake" && !ctx.offlineWakeGranted)
+                throw ContentInvalid(
+                    "$path.when_offline",
+                    "wake requires the offline.wake grant",
+                )
             if (policy in setOf("queue", "wake") && "ttl_s" !in obj)
                 throw ContentInvalid(path, "$policy requires ttl_s")
             if (policy == "drop" && ("ttl_s" in obj || "dedupe" in obj))

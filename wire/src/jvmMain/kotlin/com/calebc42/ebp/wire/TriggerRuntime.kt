@@ -10,14 +10,10 @@
 // later atom and simply call onSample/onExternal/armBaselines).
 package com.calebc42.ebp.wire
 
-import java.time.DayOfWeek
-import java.time.Instant
-import java.time.LocalTime
 import java.time.ZoneId
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -50,14 +46,16 @@ class TriggerRuntime(
      * on Android), or null if unknown. A `boot` registration is admitted at most
      * once per generation; the JVM default leaves boot triggers ungated. */
     private val bootGeneration: () -> String? = { null },
+    /** Host evaluation for predicates whose public sample omits filter detail. */
+    private val predicateProvider: (JsonObject) -> Boolean? = { null },
 ) {
 
-    private val WEEK = listOf(DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY,
-        DayOfWeek.THURSDAY, DayOfWeek.FRIDAY, DayOfWeek.SATURDAY, DayOfWeek.SUNDAY)
-    private val DAY_KEY = mapOf(
-        DayOfWeek.MONDAY to "mon", DayOfWeek.TUESDAY to "tue", DayOfWeek.WEDNESDAY to "wed",
-        DayOfWeek.THURSDAY to "thu", DayOfWeek.FRIDAY to "fri", DayOfWeek.SATURDAY to "sat",
-        DayOfWeek.SUNDAY to "sun")
+    private val predicates = StatePredicateEvaluator(
+        now = now,
+        zone = zone,
+        stateProvider = stateProvider,
+        predicateProvider = predicateProvider,
+    )
 
     // Enum state types whose primary field is a single value; a present filter
     // fires on transition INTO that value, an absent filter on any change.
@@ -92,9 +90,12 @@ class TriggerRuntime(
                         reg.baselines["side"] = batterySide(reg.entry, it) }
                 type in ENUM_FIELD -> {
                     val field = ENUM_FIELD.getValue(type)
-                    if (field in reg.entry.reqObj("params")) {
+                    val params = reg.entry.reqObj("params")
+                    val filtered = field in params ||
+                        (type == "call.state" && "number" in params)
+                    if (filtered) {
                         if (!reg.baselines.containsKey("side")) stateProvider(type)?.let {
-                            reg.baselines["side"] = enumMatch(reg.entry, field, it) }
+                            reg.baselines["side"] = levelMatch(reg.entry, field, it) }
                     } else if (!reg.baselines.containsKey("value")) stateProvider(type)?.let {
                         // C3: the baseline holds a JsonElement? — absent reads as
                         // Kotlin null and JSON null as JsonNull, the same two-way
@@ -138,9 +139,18 @@ class TriggerRuntime(
                 type == "battery.level" -> crossing(reg, batterySide(reg.entry, sample), sample)
                 type in ENUM_FIELD -> {
                     val field = ENUM_FIELD.getValue(type)
-                    if (field in reg.entry.reqObj("params"))
-                        crossing(reg, enumMatch(reg.entry, field, sample), sample)
-                    else valueChange(reg, sample[field], sample)
+                    val params = reg.entry.reqObj("params")
+                    val data = if (type == "call.state") {
+                        projectCall(params, sample)
+                    } else {
+                        sample
+                    }
+                    if (field in params ||
+                        (type == "call.state" && "number" in params)) {
+                        crossing(reg, levelMatch(reg.entry, field, sample), data)
+                    } else {
+                        valueChange(reg, sample[field], data)
+                    }
                 }
             }
         }
@@ -153,8 +163,12 @@ class TriggerRuntime(
      * occurrence is the event itself, subject to the gate and throttle.
      */
     fun onExternal(identity: String, type: String, data: JsonObject) {
-        for (reg in store.registrations(identity))
-            if (reg.entry.reqString("type") == type) tryAdmit(reg, data)
+        for (reg in store.registrations(identity)) {
+            if (reg.entry.reqString("type") != type) continue
+            projectExternal(reg.entry.reqObj("params"), type, data)?.let {
+                tryAdmit(reg, it)
+            }
+        }
     }
 
     /**
@@ -194,10 +208,14 @@ class TriggerRuntime(
     // -------------------------------------------------------- crossing logic
 
     // SPEC 21.5: a filtered level fires only when entering the configured side.
-    private fun crossing(reg: TriggerStore.Registration, side: Boolean, data: JsonObject) {
+    private fun crossing(
+        reg: TriggerStore.Registration,
+        side: Boolean,
+        data: JsonObject?,
+    ) {
         val prev = reg.baselines["side"] as Boolean?
         if (prev == null) { reg.baselines["side"] = side; return } // silent baseline
-        if (!prev && side) tryAdmit(reg, data)
+        if (!prev && side && data != null) tryAdmit(reg, data)
         reg.baselines["side"] = side
     }
 
@@ -207,10 +225,14 @@ class TriggerRuntime(
     // JsonPrimitive is a data class over (isString, content), so the type
     // strictness of the old boxed-value compare survives: the string "on" is
     // still not the number 1, and a respelled number is still a change.
-    private fun valueChange(reg: TriggerStore.Registration, value: JsonElement?, data: JsonObject) {
+    private fun valueChange(
+        reg: TriggerStore.Registration,
+        value: JsonElement?,
+        data: JsonObject?,
+    ) {
         val prev = reg.baselines["value"]
         if (!reg.baselines.containsKey("value")) { reg.baselines["value"] = value; return }
-        if (prev != value) tryAdmit(reg, data)
+        if (prev != value && data != null) tryAdmit(reg, data)
         reg.baselines["value"] = value
     }
 
@@ -224,8 +246,114 @@ class TriggerRuntime(
         return if ("above" in p) level > p.reqLong("above") else level < p.reqLong("below")
     }
 
-    private fun enumMatch(entry: JsonObject, field: String, sample: JsonObject): Boolean =
-        sample[field] == entry.reqObj("params")[field]
+    /** A call number is part of its filtered side, not merely output data. */
+    private fun levelMatch(entry: JsonObject, field: String, sample: JsonObject): Boolean {
+        val params = entry.reqObj("params")
+        if (field in params && sample[field] != params[field]) return false
+        return params.stringOrNull("number")?.let { it == sample.stringOrNull("number") }
+            ?: true
+    }
+
+    /**
+     * Match an external occurrence against one registration and return its
+     * exact public fire-data projection. Device adapters may carry internal
+     * selection fields (for example `calendar`) into this boundary; those
+     * fields are consumed here and never escape onto the wire.
+     */
+    private fun projectExternal(
+        params: JsonObject,
+        type: String,
+        data: JsonObject,
+    ): JsonObject? = when (type) {
+        "boot" -> JsonObject(emptyMap())
+        "time" -> data.stringOrNull("precision")
+            ?.takeIf { it == "exact" || it == "inexact" }
+            ?.let { precision -> buildJsonObject { put("precision", precision) } }
+        "timezone.changed" -> data.stringOrNull("tz")
+            ?.let { timezone -> buildJsonObject { put("tz", timezone) } }
+        "package" -> {
+            val event = data.stringOrNull("event")
+                ?.takeIf { it == "added" || it == "removed" }
+                ?: return null
+            val packageName = data.stringOrNull("package") ?: return null
+            if (params.stringOrNull("event")?.let { it != event } == true ||
+                params.stringOrNull("package")?.let { it != packageName } == true) {
+                null
+            } else {
+                buildJsonObject {
+                    put("event", event)
+                    put("package", packageName)
+                }
+            }
+        }
+        "network" -> {
+            val event = data.stringOrNull("event")
+                ?.takeIf { it == "available" || it == "lost" }
+                ?: return null
+            val transport = data.stringOrNull("transport")
+            if (params.stringOrNull("event")?.let { it != event } == true ||
+                params.stringOrNull("transport")?.let { it != transport } == true) {
+                null
+            } else {
+                buildJsonObject {
+                    put("event", event)
+                    transport?.let { put("transport", it) }
+                }
+            }
+        }
+        "calendar.event" -> {
+            val event = data.stringOrNull("event")
+                ?.takeIf { it == "started" || it == "ended" }
+                ?: return null
+            val calendar = data.stringOrNull("calendar")
+            val title = data.stringOrNull("title")
+            if (params.stringOrNull("event")?.let { it != event } == true ||
+                params.stringOrNull("calendar")?.let { it != calendar } == true ||
+                params.stringOrNull("title_contains")?.let { needle ->
+                    title?.contains(needle) != true
+                } == true) {
+                null
+            } else {
+                buildJsonObject {
+                    put("event", event)
+                    title?.let { put("title", it) }
+                    data["begin_ms"]?.let { put("begin_ms", it) }
+                    data["end_ms"]?.let { put("end_ms", it) }
+                }
+            }
+        }
+        "sms.received" -> {
+            val sender = data.stringOrNull("from") ?: return null
+            val body = data.stringOrNull("body")
+            if (params.stringOrNull("from")?.let { it != sender } == true ||
+                params.stringOrNull("contains")?.let { needle ->
+                    body?.contains(needle) != true
+                } == true) {
+                null
+            } else {
+                buildJsonObject {
+                    put("from", sender)
+                    if (params.boolOr("include_body")) body?.let { put("body", it) }
+                }
+            }
+        }
+        "manual" -> data.stringOrNull("source")
+            ?.takeIf { it == "tap" || it == "emacs" }
+            ?.let { source -> buildJsonObject { put("source", source) } }
+        else -> data
+    }
+
+    private fun projectCall(params: JsonObject, sample: JsonObject): JsonObject? {
+        val state = sample.stringOrNull("state")
+            ?.takeIf { it == "ringing" || it == "offhook" || it == "idle" }
+            ?: return null
+        val number = sample.stringOrNull("number")
+        if (params.stringOrNull("number")?.let { it != number } == true) return null
+        return buildJsonObject {
+            put("state", state)
+            if (params.boolOr("include_number")) number?.let { put("number", it) }
+        }
+    }
 
     // ------------------------------------------------------------- edges
 
@@ -324,76 +452,7 @@ class TriggerRuntime(
 
     // ---------------------------------------------- gate predicate eval
 
-    private fun allHold(preds: JsonArray): Boolean {
-        for (pred in preds)
-            if (!predicateHolds(pred as JsonObject)) return false
-        return true
-    }
-
-    // SPEC 21.3/21.7: a predicate that cannot be evaluated does not hold.
-    private fun predicateHolds(p: JsonObject): Boolean {
-        val type = p.reqString("type")
-        if (type == "time.window") return timeWindowHolds(p)
-        val s = stateProvider(type) ?: return false
-        return when (type) {
-            "power" -> s.stringOr("state") == p.stringOr("state", "connected")
-            "battery.level" ->
-                if ("above" in p) s.longOr("level", -1) > p.reqLong("above")
-                else s.longOr("level", -1) < p.reqLong("below")
-            "screen" -> {
-                val want = p.stringOr("state", "on"); val cur = s.stringOr("state")
-                if (want == "on") cur == "on" || cur == "unlocked" else cur == want
-            }
-            "airplane" -> s.stringOr("state") == p.stringOr("state", "on")
-            "network" -> s.boolOr("connected") &&
-                ("transport" !in p || transportsHave(s, p.reqString("transport")))
-            "headset" -> s.stringOr("state") == p.stringOr("state", "plugged")
-            "wifi.enabled" -> s.boolOr("enabled") == p.boolOr("enabled", true)
-            "bluetooth.enabled" ->
-                "enabled" in s && s.boolOr("enabled") == p.boolOr("enabled", true)
-            "calendar.event" -> s.boolOr("ongoing")
-            "call.state" -> s.stringOr("state") == p.stringOr("state", "offhook")
-            else -> false
-        }
-    }
-
-    private fun transportsHave(s: JsonObject, transport: String): Boolean {
-        val arr = s.arrOrNull("transports") ?: return false
-        // C3: element-to-element comparison against the JSON STRING spelling —
-        // JsonPrimitive equality is over (isString, content), so a number or a
-        // nested container entry can never match a transport name, which is
-        // what the old `arr.opt(i) == transport` (String equality) meant.
-        return arr.any { it == JsonPrimitive(transport) }
-    }
-
-    // SPEC 21.7: local civil time in the half-open window; wraps at midnight
-    // when after > before; days selects the civil day the after-portion begins.
-    private fun timeWindowHolds(p: JsonObject): Boolean {
-        val zdt = Instant.ofEpochMilli(now()).atZone(zone())
-        val nowT = zdt.toLocalTime()
-        val after = p.stringOr("after").takeIf { it.isNotEmpty() }?.let { LocalTime.parse(it) }
-        val before = p.stringOr("before").takeIf { it.isNotEmpty() }?.let { LocalTime.parse(it) }
-        // A non-string day throws, as the org.json `getString(i)` did: the
-        // validator normalizes `days` to weekday strings, so an entry that is
-        // anything else is a corrupt store, not a predicate that "does not hold".
-        val days = p.arrOrNull("days")?.let { a ->
-            a.map { it.asStringOrNull() ?: throw NoSuchElementException("days") }.toSet()
-        } ?: WEEK.map { DAY_KEY.getValue(it) }.toSet()
-        val wraps = after != null && before != null && after > before
-        val inTime = when {
-            after == null && before == null -> true
-            after == null -> nowT < before
-            before == null -> nowT >= after
-            !wraps -> nowT >= after && nowT < before
-            else -> nowT >= after || nowT < before // wrapping
-        }
-        if (!inTime) return false
-        // The civil day: for a wrapping window, the after-portion's day owns
-        // the whole window, so 01:00 belongs to the prior day's after side.
-        val day = if (wraps && before != null && nowT < before)
-            zdt.minusDays(1).dayOfWeek else zdt.dayOfWeek
-        return DAY_KEY.getValue(day) in days
-    }
+    private fun allHold(preds: JsonArray): Boolean = predicates.allHold(preds)
 
     companion object {
         /**

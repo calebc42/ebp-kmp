@@ -8,7 +8,10 @@ package com.calebc42.ebp.wire
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import org.junit.Assert.assertEquals
@@ -31,6 +34,7 @@ class CapabilityTest {
     private fun engine(out: MutableList<JsonObject>,
                        grant: Boolean = true,
                        deviceReport: JsonObject = report("vibrate", "clipboard.read", "volume.set"),
+                       deviceReportProvider: (() -> JsonObject)? = null,
                        handler: CapabilityHandler? = CapabilityHandler { cap, args ->
                            calls.add(cap to args)
                            when (cap) {
@@ -58,6 +62,7 @@ class CapabilityTest {
             limits = testLimits("max_device_report_bytes" to 8192,
                 "max_rich_spans" to 4096, "max_table_cells" to 4096),
             deviceReport = deviceReport,
+            deviceReportProvider = deviceReportProvider,
             capabilityHandler = handler, nonceSource = { katSn })) { bytes ->
             FrameDecoder().let { d -> d.feed(bytes) { out.add(it) } }
         }
@@ -88,6 +93,26 @@ class CapabilityTest {
         val out2 = mutableListOf<JsonObject>()
         engine(out2, grant = false)
         assertFalse("device" in out2.replyTo("h2").reqObj("result"))
+    }
+
+    @Test
+    fun eachConnectionFreezesOneFreshDeviceReportSnapshot() {
+        var granted = false
+        val provider = {
+            report("vibrate").with("permissions", buildJsonObject {
+                put("camera", granted)
+            })
+        }
+        val first = mutableListOf<JsonObject>()
+        engine(first, deviceReport = provider(), deviceReportProvider = provider)
+        assertFalse(first.replyTo("h2").reqObj("result").reqObj("device")
+            .reqObj("permissions").boolOr("camera"))
+
+        granted = true
+        val second = mutableListOf<JsonObject>()
+        engine(second, deviceReport = provider(), deviceReportProvider = provider)
+        assertTrue(second.replyTo("h2").reqObj("result").reqObj("device")
+            .reqObj("permissions").boolOr("camera"))
     }
 
     @Test(expected = IllegalArgumentException::class)
@@ -208,12 +233,20 @@ class CapabilityTest {
         // Real validated caps whose host executor refuses at invocation time.
         val engine = engine(out, deviceReport = report("flashlight", "vibrate"),
             handler = CapabilityHandler { cap, _ ->
-                if (cap == "flashlight") CapabilityOutcome.Fail(1002, "needs-grant")
+                if (cap == "flashlight") CapabilityOutcome.Fail(
+                    1002,
+                    "needs-grant",
+                    "android.permission.CAMERA",
+                )
                 else CapabilityOutcome.Fail(1003, "hardware-busy")
             })
         invoke(engine, "c1", "flashlight", buildJsonObject { put("on", true) })
         assertEquals(1002L, out.errorOf("c1").reqLong("code"))
         assertEquals("cap-permission", out.errorOf("c1").reqObj("data").reqString("kind"))
+        assertEquals(
+            "android.permission.CAMERA",
+            out.errorOf("c1").reqObj("data").reqString("permission"),
+        )
         invoke(engine, "c2", "vibrate", buildJsonObject { put("ms", 100) })
         assertEquals(1003L, out.errorOf("c2").reqLong("code"))
         assertEquals("hardware-busy", out.errorOf("c2").reqObj("data").reqString("reason"))
@@ -290,8 +323,215 @@ class CapabilityTest {
         assertTrue(ok("clipboard.read", JsonObject(emptyMap())))
         assertFalse(ok("clipboard.read", buildJsonObject { put("x", 1) }))
 
-        // A real catalog entry this build does not yet validate must throw,
-        // never silently pass an unvalidated Args object to a side effect.
-        assertFalse(ok("state.get", JsonObject(emptyMap())))
+        assertTrue(ok("state.get", JsonObject(emptyMap())))
+    }
+
+    @Test
+    fun completeCatalogHasAValidatedHappyPath() {
+        val context = CapabilityValidationContext(
+            stateTypes = setOf("battery.level", "screen"),
+            maxShortcutIconBytes = 64,
+            maxShortcuts = 2,
+            maxFieldBytes = 128,
+        )
+        val remote = buildJsonObject { put("action", "shortcut.run") }
+        val png = "iVBORw0KGgo=" // standard padded base64 with the PNG signature
+        val valid = mapOf(
+            "settings.open" to buildJsonObject { put("panel", "notifications") },
+            "intent.start" to buildJsonObject {
+                put("action", "android.intent.action.VIEW")
+                put("data", "https://example.test/path")
+                put("mode", "activity")
+                putJsonObject("extras") {
+                    put("label", "x")
+                    put("count", 2)
+                    putJsonArray("flags") { add(true); add(false) }
+                }
+            },
+            "app.launch" to buildJsonObject { put("package", "example.app") },
+            "apps.list" to buildJsonObject { put("cursor", "a.app"); put("limit", 2) },
+            "shortcut.pin" to buildJsonObject {
+                put("id", "pin")
+                put("label", "Pinned")
+                put("action", remote)
+                put("icon_png", png)
+            },
+            "shortcuts.set" to buildJsonObject {
+                putJsonArray("shortcuts") {
+                    add(buildJsonObject {
+                        put("id", "one")
+                        put("label", "One")
+                        put("action", remote)
+                    })
+                }
+            },
+            "vibrate" to buildJsonObject { put("ms", 20) },
+            "tts.speak" to buildJsonObject { put("text", "hello") },
+            "volume.set" to buildJsonObject { put("stream", "music"); put("level", 3) },
+            "ringer.mode" to buildJsonObject { put("mode", "normal") },
+            "flashlight" to buildJsonObject { put("on", true) },
+            "media.key" to buildJsonObject { put("key", "play_pause") },
+            "clipboard.read" to JsonObject(emptyMap()),
+            "screen.keep_on" to buildJsonObject { put("on", true) },
+            "brightness.set" to buildJsonObject { put("level", 128) },
+            "dnd.set" to buildJsonObject { put("mode", "priority") },
+            "state.get" to buildJsonObject {
+                putJsonArray("types") { add("battery.level") }
+                putJsonArray("when") {
+                    add(buildJsonObject {
+                        put("type", "screen")
+                        put("state", "unlocked")
+                    })
+                }
+            },
+            "trigger.fire" to buildJsonObject { put("id", "manual.one") },
+        )
+        assertEquals(CapabilityCatalog.VALIDATED, valid.keys)
+        valid.forEach { (cap, args) ->
+            CapabilityCatalog.validateArgs(cap, args, context)
+        }
+    }
+
+    @Test
+    fun shortcutAndIntentBoundsRejectBeforeHostExecution() {
+        val context = CapabilityValidationContext(
+            stateTypes = setOf("screen"),
+            maxShortcutIconBytes = 7,
+            maxShortcuts = 1,
+        )
+        val conflict = buildJsonObject {
+            put("action", "shortcut.run")
+            putJsonObject("args") { put("shortcut_id", "authored") }
+        }
+        assertFalse(runCatching {
+            CapabilityCatalog.validateArgs("shortcut.pin", buildJsonObject {
+                put("id", "pin")
+                put("label", "Pinned")
+                put("action", conflict)
+            }, context)
+        }.isSuccess)
+        val wakeShortcut = buildJsonObject {
+            put("id", "pin")
+            put("label", "Pinned")
+            putJsonObject("action") {
+                put("action", "shortcut.run")
+                put("when_offline", "wake")
+                put("ttl_s", 60)
+            }
+        }
+        assertFalse(runCatching {
+            CapabilityCatalog.validateArgs("shortcut.pin", wakeShortcut, context)
+        }.isSuccess)
+        CapabilityCatalog.validateArgs(
+            "shortcut.pin",
+            wakeShortcut,
+            context.copy(offlineWakeGranted = true),
+        )
+        assertFalse(runCatching {
+            CapabilityCatalog.validateArgs("shortcut.pin", buildJsonObject {
+                put("id", "pin")
+                put("label", "Pinned")
+                putJsonObject("action") {
+                    put("action", "shortcut.run")
+                    put("open_surface", "app:detail")
+                }
+            }, context)
+        }.isSuccess)
+        assertFalse(runCatching {
+            CapabilityCatalog.validateArgs("shortcut.pin", buildJsonObject {
+                put("id", "pin")
+                put("label", "Pinned")
+                put("action", buildJsonObject { put("action", "shortcut.run") })
+                put("icon_png", "iVBORw0KGgo=")
+            }, context)
+        }.isSuccess)
+        assertFalse(runCatching {
+            CapabilityCatalog.validateArgs("intent.start", buildJsonObject {
+                put("action", "android.intent.action.VIEW")
+                put("data", "https://user@example.test")
+            })
+        }.isSuccess)
+        assertFalse(runCatching {
+            CapabilityCatalog.validateArgs("intent.start", buildJsonObject {
+                put("action", "android.intent.action.VIEW")
+                put("class_name", "ExampleActivity")
+            })
+        }.isSuccess)
+    }
+
+    @Test
+    fun catalogDoesNotInventNonEmptyRulesForPlainStringFields() {
+        // SPEC 20.3 narrows apps.list labels to non-empty, but Shortcut labels,
+        // headset names, and call numbers retain the ordinary string rule.
+        CapabilityCatalog.validateArgs("shortcut.pin", buildJsonObject {
+            put("id", "pin")
+            put("label", "")
+            put("long_label", "")
+            put("action", buildJsonObject { put("action", "shortcut.run") })
+        })
+        CapabilityCatalog.validateResult("state.get", buildJsonObject {
+            putJsonObject("states") {
+                putJsonObject("headset") {
+                    put("state", "plugged")
+                    put("name", "")
+                }
+                putJsonObject("call.state") {
+                    put("state", "ringing")
+                    put("number", "")
+                }
+            }
+        }, CapabilityValidationContext(
+            stateTypes = setOf("headset", "call.state"),
+        ))
+    }
+
+    @Test
+    fun hostResultsAreClosedAndBounded() {
+        val context = CapabilityValidationContext(
+            stateTypes = setOf("battery.level", "screen"),
+            maxShortcuts = 2,
+            maxFieldBytes = 8,
+        )
+        CapabilityCatalog.validateResult("apps.list", buildJsonObject {
+            put("apps", buildJsonArray {
+                add(buildJsonObject { put("label", "A"); put("package", "a.app") })
+                add(buildJsonObject { put("label", "B"); put("package", "b.app") })
+            })
+            put("next_cursor", "b.app")
+        }, context)
+        // U+E000 sorts before U+10000 by code point, but after it by UTF-16
+        // code unit. The protocol explicitly requires the former ordering.
+        CapabilityCatalog.validateResult("apps.list", buildJsonObject {
+            put("apps", buildJsonArray {
+                add(buildJsonObject { put("label", "BMP"); put("package", "\uE000.app") })
+                add(buildJsonObject {
+                    put("label", "Supplementary")
+                    put("package", "\uD800\uDC00.app")
+                })
+            })
+        }, context)
+        CapabilityCatalog.validateResult("state.get", buildJsonObject {
+            putJsonObject("states") {
+                putJsonObject("battery.level") { put("level", 50) }
+                putJsonObject("screen") { put("state", "unlocked") }
+            }
+            put("holds", true)
+        }, context)
+        assertFalse(runCatching {
+            CapabilityCatalog.validateResult("apps.list", buildJsonObject {
+                put("apps", buildJsonArray {
+                    add(buildJsonObject { put("label", "B"); put("package", "b.app") })
+                    add(buildJsonObject { put("label", "A"); put("package", "a.app") })
+                })
+            }, context)
+        }.isSuccess)
+        assertFalse(runCatching {
+            CapabilityCatalog.validateResult("clipboard.read", buildJsonObject {
+                put("text", "too long")
+            }, context)
+        }.isSuccess)
+        assertFalse(runCatching {
+            CapabilityCatalog.validateResult("vibrate", buildJsonObject { put("private", true) })
+        }.isSuccess)
     }
 }

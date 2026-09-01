@@ -14,7 +14,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 
-private val SURFACE_ID = Regex("(app|notification|widget):[A-Za-z0-9][A-Za-z0-9._:/-]*")
+private val SURFACE_ID = Regex("(app|notification|widget|tile):[A-Za-z0-9][A-Za-z0-9._:/-]*")
 
 data class SurfaceResult(val status: String, val revision: Long, val present: Boolean)
 
@@ -60,11 +60,20 @@ class SurfaceStore(
     private val maxWidgetLazyItems: Int = MAX_WIDGET_LAZY_ITEMS,
     private val maxWidgetNodeDepth: Int = MAX_WIDGET_NODE_DEPTH,
     private val maxWidgetSizeVariants: Int = MAX_WIDGET_SIZE_VARIANTS,
+    /** SPEC 13.4: a tile has no node vocabulary, but its context-less
+     * on_tap descriptor remains gated by the tile profile. */
+    private val tileBuiltins: Set<String>? = null,
+    private val tileFeatures: Set<String>? = null,
+    /** Optional host inventory of manifest-declared fixed tile slots. */
+    private val tileSurfaceIds: Set<String>? = null,
     /** EBP schemas plus receiver-selected renderer extension schemas. */
     private val nodeVocabulary: NodeVocabulary = EBP_NODE_VOCABULARY,
     /** SPEC 13.1/15.1: durable surface histories + input_state. In-memory
      * by default; DeviceBridge wires a file so both survive process death. */
     private val backing: SurfaceBacking = MemorySurfaceBacking(),
+    /** Whether restored descriptors may retain a previously accepted `wake`
+     * policy. Session updates still pass the actual negotiated grant. */
+    private val offlineWakeConfigured: Boolean = false,
 ) {
 
     private class Record(
@@ -117,7 +126,9 @@ class SurfaceStore(
                             advertisedFeatures = notificationFeatures,
                             maxChartPoints = maxChartPoints, maxCanvasOps = maxCanvasOps,
                             maxRichSpans = maxRichSpans, maxTableCells = maxTableCells,
-                            nodeVocabulary = nodeVocabulary)
+                            nodeVocabulary = nodeVocabulary,
+                            offlineWakeGranted = offlineWakeConfigured,
+                        )
                         r.staleSpec?.let { stale ->
                             SpecValidator.validateNotificationSpec(
                                 stale,
@@ -131,6 +142,7 @@ class SurfaceStore(
                                 maxRichSpans = maxRichSpans,
                                 maxTableCells = maxTableCells,
                                 nodeVocabulary = nodeVocabulary,
+                                offlineWakeGranted = offlineWakeConfigured,
                             )
                         }
                         emptyMap()
@@ -146,6 +158,7 @@ class SurfaceStore(
                             maxLazyItems = maxWidgetLazyItems,
                             maxNodeDepth = maxWidgetNodeDepth,
                             maxSizeVariants = maxWidgetSizeVariants,
+                            offlineWakeGranted = offlineWakeConfigured,
                         )
                         r.staleSpec?.let { stale ->
                             SpecValidator.validateWidgetSpec(
@@ -160,6 +173,24 @@ class SurfaceStore(
                                 maxLazyItems = maxWidgetLazyItems,
                                 maxNodeDepth = maxWidgetNodeDepth,
                                 maxSizeVariants = maxWidgetSizeVariants,
+                                offlineWakeGranted = offlineWakeConfigured,
+                            )
+                        }
+                        emptyMap()
+                    } else if (namespace(r.surface) == "tile") {
+                        SpecValidator.validateTileSpec(
+                            r.spec,
+                            advertisedBuiltins = tileBuiltins,
+                            advertisedFeatures = tileFeatures,
+                            offlineWakeGranted = offlineWakeConfigured,
+                        )
+                        r.staleSpec?.let { stale ->
+                            SpecValidator.validateTileSpec(
+                                stale,
+                                path = "stale_spec",
+                                advertisedBuiltins = tileBuiltins,
+                                advertisedFeatures = tileFeatures,
+                                offlineWakeGranted = offlineWakeConfigured,
                             )
                         }
                         emptyMap()
@@ -171,7 +202,9 @@ class SurfaceStore(
                             advertisedTypes = appNodeTypes,
                             advertisedBuiltins = appBuiltins,
                             advertisedFeatures = appFeatures,
-                            nodeVocabulary = nodeVocabulary)
+                            nodeVocabulary = nodeVocabulary,
+                            offlineWakeGranted = offlineWakeConfigured,
+                        )
                             .also {
                                 r.staleSpec?.let { stale ->
                                     SpecValidator.validateStaleSpec(
@@ -186,6 +219,7 @@ class SurfaceStore(
                                         appBuiltins,
                                         appFeatures,
                                         nodeVocabulary,
+                                        offlineWakeGranted = offlineWakeConfigured,
                                     )
                                 }
                             }
@@ -319,7 +353,8 @@ class SurfaceStore(
     }
 
     fun isValidSurfaceId(id: String): Boolean =
-        SURFACE_ID.matches(id) && id.toByteArray(Charsets.UTF_8).size <= 128
+        SURFACE_ID.matches(id) && id.toByteArray(Charsets.UTF_8).size <= 128 &&
+            (namespace(id) != "tile" || tileSurfaceIds == null || id in tileSurfaceIds)
 
     /** The accepted snapshot for a present surface, for rendering. */
     fun spec(surface: String): JsonObject? =
@@ -406,7 +441,9 @@ class SurfaceStore(
 
     fun update(surface: String, revision: Long, spec: JsonObject,
                staleSpec: JsonObject?, currentView: String?,
-               resetIds: JsonArray?, staleAfterSeconds: Long? = null): SurfaceResult {
+               resetIds: JsonArray?,
+               staleAfterSeconds: Long? = null,
+               offlineWakeGranted: Boolean = offlineWakeConfigured): SurfaceResult {
         if (staleAfterSeconds != null && staleAfterSeconds <= 0)
             throw ContentInvalid("stale_after_s", "must be a positive integer")
         // SPEC 13.2: validate the entire request before changing state.
@@ -422,7 +459,8 @@ class SurfaceStore(
                 advertisedFeatures = notificationFeatures,
                 maxChartPoints = maxChartPoints, maxCanvasOps = maxCanvasOps,
                 maxRichSpans = maxRichSpans, maxTableCells = maxTableCells,
-                nodeVocabulary = nodeVocabulary)
+                nodeVocabulary = nodeVocabulary,
+                offlineWakeGranted = offlineWakeGranted)
             if (currentView != null)
                 throw ContentInvalid("current_view", "not valid for a notification surface")
             if (resetIds != null && resetIds.size > 0)
@@ -434,7 +472,33 @@ class SurfaceStore(
                     advertisedFeatures = notificationFeatures,
                     maxChartPoints = maxChartPoints, maxCanvasOps = maxCanvasOps,
                     maxRichSpans = maxRichSpans, maxTableCells = maxTableCells,
-                    nodeVocabulary = nodeVocabulary)
+                    nodeVocabulary = nodeVocabulary,
+                    offlineWakeGranted = offlineWakeGranted)
+            }
+            statefuls = emptyMap()
+            reset = emptySet()
+            isMultiView = false
+        } else if (namespace(surface) == "tile") {
+            // SPEC 13.4: a tile is a closed host-slot projection, not a Node
+            // tree. It has no current view, drafts, or resettable inputs.
+            SpecValidator.validateTileSpec(
+                spec,
+                advertisedBuiltins = tileBuiltins,
+                advertisedFeatures = tileFeatures,
+                offlineWakeGranted = offlineWakeGranted,
+            )
+            if (currentView != null)
+                throw ContentInvalid("current_view", "not valid for a tile surface")
+            if (resetIds != null && resetIds.isNotEmpty())
+                throw ContentInvalid("reset_input_ids", "a tile surface has no drafts")
+            staleSpec?.let {
+                SpecValidator.validateTileSpec(
+                    it,
+                    path = "stale_spec",
+                    advertisedBuiltins = tileBuiltins,
+                    advertisedFeatures = tileFeatures,
+                    offlineWakeGranted = offlineWakeGranted,
+                )
             }
             statefuls = emptyMap()
             reset = emptySet()
@@ -483,7 +547,8 @@ class SurfaceStore(
                 maxRichSpans = maxRichSpans, maxTableCells = maxTableCells,
                 advertisedTypes = appNodeTypes, advertisedBuiltins = appBuiltins,
                 advertisedFeatures = appFeatures,
-                nodeVocabulary = nodeVocabulary)
+                nodeVocabulary = nodeVocabulary,
+                offlineWakeGranted = offlineWakeGranted)
             reset = resetIds?.let { SpecValidator.validateResetIds(it, statefuls) }
                 ?: emptySet()
             // SPEC 13.5/14.2/17.1: a stale_spec is RENDERED while
@@ -494,7 +559,8 @@ class SurfaceStore(
             staleSpec?.let { SpecValidator.validateStaleSpec(it, "views" in spec,
                 maxCaptureFields, maxChartPoints, maxCanvasOps,
                 maxRichSpans, maxTableCells, appNodeTypes, appBuiltins,
-                appFeatures, nodeVocabulary) }
+                appFeatures, nodeVocabulary,
+                offlineWakeGranted = offlineWakeGranted) }
             isMultiView = "views" in spec
             if (currentView != null) {
                 if (!isMultiView || currentView !in spec.reqObj("views"))
