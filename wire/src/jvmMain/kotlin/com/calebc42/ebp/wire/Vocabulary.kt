@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// GENERATED from ebp/contract.json (format 11,
+// GENERATED from ebp/contract.json (format 12,
 // spec 3.1.0-draft) by tools/gen-vocabulary.py — DO NOT EDIT.
 // VocabularyDriftTest re-reads the contract and fails on any disagreement.
 package com.calebc42.ebp.wire
@@ -126,7 +126,7 @@ data class TextInputContract(
     val logicalValueExcludes: List<String>,
 )
 
-const val CONTRACT_FORMAT = 11
+const val CONTRACT_FORMAT = 12
 const val PROTOCOL_VERSION = 3
 const val SPEC_VERSION = "3.1.0-draft"
 
@@ -135,6 +135,30 @@ val CORE_NODE_SET: Set<String> = setOf("text", "row", "column", "box", "spacer",
 val UNIVERSAL_NODE_ATTRIBUTES: Set<String> = setOf("key", "id", "scroll_here", "padding", "pad", "width", "height", "min_width", "max_width", "min_height", "max_height", "fill_fraction", "aspect_ratio", "weight", "bg", "corner", "border", "alpha", "clip", "align_self", "semantics")
 
 const val MAX_SEMANTIC_ACTIONS_PER_NODE = 8
+const val MAX_WIDGET_NODES = 128
+const val MAX_WIDGET_LAZY_ITEMS = 40
+const val MAX_WIDGET_NODE_DEPTH = 12
+const val MAX_WIDGET_SIZE_VARIANTS = 8
+const val MAX_WIDGET_REMOTE_VIEWS_BYTES = 716800
+const val MAX_SWIPE_ACTIONS_PER_SIDE = 4
+
+val RENDERER_PROFILE_REQUIRED: Set<String> = setOf("node_types", "builtins", "features", "extensions")
+val RENDERER_PROFILE_OPTIONAL: Set<String> = setOf("members", "limits")
+val RENDERER_MEMBER_SUPPORT_REQUIRED: Set<String> = setOf("universal", "nodes", "semantics", "surface")
+val RENDERER_PROFILE_LIMIT_MEMBERS: Set<String> = setOf("max_nodes", "max_lazy_items", "max_node_depth", "max_size_variants", "max_remote_views_bytes")
+
+val WIDGET_SURFACE_REQUIRED: Set<String> = setOf("title", "body")
+val WIDGET_SURFACE_OPTIONAL: Set<String> = setOf("empty", "header_action", "size_variants")
+val WIDGET_SIZE_VARIANT_REQUIRED: Set<String> = setOf("min_width", "min_height", "body")
+val WIDGET_SIZE_VARIANT_OPTIONAL: Set<String> = setOf()
+
+val LEGACY_SWIPE_REQUIRED: Set<String> = setOf("label", "on_trigger")
+val LEGACY_SWIPE_OPTIONAL: Set<String> = setOf("icon", "color")
+val RICH_SWIPE_REQUIRED: Set<String> = setOf("actions")
+val RICH_SWIPE_OPTIONAL: Set<String> = setOf("commit")
+val SWIPE_ACTION_REQUIRED: Set<String> = setOf("label", "on_trigger")
+val SWIPE_ACTION_OPTIONAL: Set<String> = setOf("icon", "color")
+const val SWIPE_COMMIT_MAX_ACTIONS = 2
 
 val SEMANTICS_SCHEMA = SemanticObjectRow(
     required = setOf(),

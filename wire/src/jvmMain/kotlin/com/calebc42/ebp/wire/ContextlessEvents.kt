@@ -48,6 +48,42 @@ fun extensionsFromProfiles(profiles: JsonObject, target: String): Set<String>? {
     return buildSet { for (e in arr) e.asStringOrNull()?.let(::add) }
 }
 
+/** Optional EBP 3 §10.2 exact member restriction for a renderer target. */
+data class ProfileMemberSupport(
+    val universal: Set<String>,
+    val nodes: Map<String, Set<String>>,
+    val semantics: Set<String>,
+    val surface: Set<String>,
+)
+
+fun memberSupportFromProfiles(
+    profiles: JsonObject,
+    target: String,
+): ProfileMemberSupport? {
+    val members = profiles.objOrNull(target)?.objOrNull("members") ?: return null
+    fun names(member: String): Set<String>? = members.arrOrNull(member)?.let { array ->
+        buildSet { for (element in array) element.asStringOrNull()?.let(::add) }
+    }
+    val nodes = members.objOrNull("nodes") ?: return null
+    val nodeMembers = buildMap {
+        nodes.forEach { (nodeType, value) ->
+            val array = value as? kotlinx.serialization.json.JsonArray ?: return null
+            put(nodeType, buildSet {
+                for (element in array) element.asStringOrNull()?.let(::add)
+            })
+        }
+    }
+    return ProfileMemberSupport(
+        universal = names("universal") ?: return null,
+        nodes = nodeMembers,
+        semantics = names("semantics") ?: return null,
+        surface = names("surface") ?: return null,
+    )
+}
+
+fun targetLimitsFromProfiles(profiles: JsonObject, target: String): JsonObject? =
+    profiles.objOrNull(target)?.objOrNull("limits")
+
 /**
  * The live-session duties a context-less event needs only when a connection
  * exists: deliver a `drop` event live, and wake + advance the pump after a
@@ -131,6 +167,77 @@ fun dispatchContextless(
             })
         }
         // SPEC 15.1: a drop event delivers live or is lost; no session = lost.
+        else -> live?.deliverLiveDrop(params, callback)
+    }
+}
+
+/**
+ * Route a cold platform-surface occurrence through the same durable
+ * event.action outbox while preserving its accepted surface revision.
+ *
+ * Widgets use this entry point because process death may remove the live
+ * [CompanionEngine], but the Room queue and the revision captured by the
+ * rendered click token remain authoritative. Widget profiles prohibit
+ * stateful nodes, so there is no independent Kotlin field/capture model here.
+ */
+fun dispatchSurfaceOccurrence(
+    queue: DurableQueue,
+    maxEventBytes: Long,
+    descriptor: JsonObject,
+    surface: String,
+    revisionSeen: Long,
+    live: LiveSession?,
+    callback: ((String?, JsonObject?) -> Unit)? = null,
+) {
+    if ("action" !in descriptor || surface.isBlank() || revisionSeen < 0) return
+    val policy = descriptor.stringOr("when_offline", OFFLINE_DEFAULT)
+    val params = buildJsonObject {
+        put("event_id", EbpAuth.generateNonce())
+        put("action", descriptor.reqString("action"))
+        put("surface", surface)
+        put("revision_seen", revisionSeen)
+        put("occurred_at_ms", queue.effectiveNow())
+        descriptor.objOrNull("args")?.takeIf { it.isNotEmpty() }?.let { put("args", it) }
+        if (policy == "queue" || policy == "wake") {
+            put("queued_at_ms", queue.effectiveNow())
+        }
+    }
+    if (params.toString().toByteArray(Charsets.UTF_8).size > maxEventBytes) {
+        callback?.invoke(null, buildJsonObject {
+            put("code", 1201)
+            put("message", "Event exceeds max_event_bytes")
+            put("data", buildJsonObject {
+                put("kind", "content-invalid")
+                put("reason", "event-too-large")
+            })
+        })
+        return
+    }
+    when (policy) {
+        "queue", "wake" -> when (
+            queue.admit(
+                params,
+                policy,
+                descriptor.stringOr("dedupe").takeIf(String::isNotEmpty),
+                integralLongOrNull(descriptor["ttl_s"])
+                    ?: throw NoSuchElementException("ttl_s"),
+            )
+        ) {
+            is AdmitResult.Admitted -> {
+                live?.onDurableAdmitted(policy)
+                callback?.invoke("queued", null)
+            }
+            AdmitResult.QueueFull -> callback?.invoke(null, buildJsonObject {
+                put("code", 1601)
+                put("message", "Queue full")
+                put("data", buildJsonObject { put("kind", "queue-full") })
+            })
+            AdmitResult.StorageFailed -> callback?.invoke(null, buildJsonObject {
+                put("code", -32603)
+                put("message", "Storage failed")
+                put("data", buildJsonObject { put("kind", "internal-error") })
+            })
+        }
         else -> live?.deliverLiveDrop(params, callback)
     }
 }

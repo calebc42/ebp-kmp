@@ -144,6 +144,12 @@ class SpecLimitsTest {
             "max_variants_per_host" to WireLimits.MAX_VARIANTS_PER_HOST,
             "max_semantic_actions_per_node" to
                 MAX_SEMANTIC_ACTIONS_PER_NODE,
+            "max_widget_nodes" to MAX_WIDGET_NODES,
+            "max_widget_lazy_items" to MAX_WIDGET_LAZY_ITEMS,
+            "max_widget_node_depth" to MAX_WIDGET_NODE_DEPTH,
+            "max_widget_size_variants" to MAX_WIDGET_SIZE_VARIANTS,
+            "max_widget_remote_views_bytes" to MAX_WIDGET_REMOTE_VIEWS_BYTES,
+            "max_swipe_actions_per_side" to MAX_SWIPE_ACTIONS_PER_SIDE,
             "max_identifier_bytes" to WireLimits.MAX_IDENTIFIER_OCTETS,
             "max_request_id_bytes" to WireLimits.MAX_REQUEST_ID_OCTETS,
             "max_method_bytes" to WireLimits.MAX_METHOD_OCTETS,

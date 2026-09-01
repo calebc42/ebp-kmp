@@ -45,13 +45,21 @@ class SurfaceStore(
     // unadvertised-but-known type degrades. null = allow all (in-memory tests).
     private val appNodeTypes: Set<String>? = null,
     private val notificationNodeTypes: Set<String>? = null,
+    private val widgetNodeTypes: Set<String>? = null,
     // SPEC 14.2 (LD-17): the advertised builtins per target, for the
     // invalid-context gate. null = allow all.
     private val appBuiltins: Set<String>? = null,
     private val notificationBuiltins: Set<String>? = null,
+    private val widgetBuiltins: Set<String>? = null,
     // SPEC 22.4: target-scoped constraining/member-gating features.
     private val appFeatures: Set<String>? = null,
     private val notificationFeatures: Set<String>? = null,
+    private val widgetFeatures: Set<String>? = null,
+    private val widgetMembers: ProfileMemberSupport? = null,
+    private val maxWidgetNodes: Int = MAX_WIDGET_NODES,
+    private val maxWidgetLazyItems: Int = MAX_WIDGET_LAZY_ITEMS,
+    private val maxWidgetNodeDepth: Int = MAX_WIDGET_NODE_DEPTH,
+    private val maxWidgetSizeVariants: Int = MAX_WIDGET_SIZE_VARIANTS,
     /** EBP schemas plus receiver-selected renderer extension schemas. */
     private val nodeVocabulary: NodeVocabulary = EBP_NODE_VOCABULARY,
     /** SPEC 13.1/15.1: durable surface histories + input_state. In-memory
@@ -65,6 +73,8 @@ class SurfaceStore(
         var spec: JsonObject?,
         var currentView: String?,
         var statefuls: Map<String, JsonObject>,
+        var staleSpec: JsonObject?,
+        var staleAfterSeconds: Long?,
     )
 
     private val records = LinkedHashMap<String, Record>()
@@ -91,6 +101,8 @@ class SurfaceStore(
             var present = r.present
             var spec = r.spec
             var currentView = r.currentView
+            var staleSpec = r.staleSpec
+            var staleAfterSeconds = r.staleAfterSeconds
             val statefuls = if (r.present && r.spec != null) {
                 // SPEC 13.4: the namespace decides the variant, on RELOAD too.
                 // Re-validating a notification spec ({body, meta?}) with the
@@ -106,6 +118,50 @@ class SurfaceStore(
                             maxChartPoints = maxChartPoints, maxCanvasOps = maxCanvasOps,
                             maxRichSpans = maxRichSpans, maxTableCells = maxTableCells,
                             nodeVocabulary = nodeVocabulary)
+                        r.staleSpec?.let { stale ->
+                            SpecValidator.validateNotificationSpec(
+                                stale,
+                                "stale_spec",
+                                maxCaptureFields = maxCaptureFields,
+                                advertisedTypes = notificationNodeTypes,
+                                advertisedBuiltins = notificationBuiltins,
+                                advertisedFeatures = notificationFeatures,
+                                maxChartPoints = maxChartPoints,
+                                maxCanvasOps = maxCanvasOps,
+                                maxRichSpans = maxRichSpans,
+                                maxTableCells = maxTableCells,
+                                nodeVocabulary = nodeVocabulary,
+                            )
+                        }
+                        emptyMap()
+                    } else if (namespace(r.surface) == "widget") {
+                        SpecValidator.validateWidgetSpec(
+                            r.spec,
+                            advertisedTypes = widgetNodeTypes,
+                            advertisedBuiltins = widgetBuiltins,
+                            advertisedFeatures = widgetFeatures,
+                            advertisedMembers = widgetMembers,
+                            nodeVocabulary = nodeVocabulary,
+                            maxNodes = maxWidgetNodes,
+                            maxLazyItems = maxWidgetLazyItems,
+                            maxNodeDepth = maxWidgetNodeDepth,
+                            maxSizeVariants = maxWidgetSizeVariants,
+                        )
+                        r.staleSpec?.let { stale ->
+                            SpecValidator.validateWidgetSpec(
+                                stale,
+                                "stale_spec",
+                                advertisedTypes = widgetNodeTypes,
+                                advertisedBuiltins = widgetBuiltins,
+                                advertisedFeatures = widgetFeatures,
+                                advertisedMembers = widgetMembers,
+                                nodeVocabulary = nodeVocabulary,
+                                maxNodes = maxWidgetNodes,
+                                maxLazyItems = maxWidgetLazyItems,
+                                maxNodeDepth = maxWidgetNodeDepth,
+                                maxSizeVariants = maxWidgetSizeVariants,
+                            )
+                        }
                         emptyMap()
                     } else {
                         SpecValidator.validateSurfaceSpec(r.spec,
@@ -116,6 +172,23 @@ class SurfaceStore(
                             advertisedBuiltins = appBuiltins,
                             advertisedFeatures = appFeatures,
                             nodeVocabulary = nodeVocabulary)
+                            .also {
+                                r.staleSpec?.let { stale ->
+                                    SpecValidator.validateStaleSpec(
+                                        stale,
+                                        "views" in r.spec,
+                                        maxCaptureFields,
+                                        maxChartPoints,
+                                        maxCanvasOps,
+                                        maxRichSpans,
+                                        maxTableCells,
+                                        appNodeTypes,
+                                        appBuiltins,
+                                        appFeatures,
+                                        nodeVocabulary,
+                                    )
+                                }
+                            }
                     }
                 }.getOrNull()
                 if (revalidated == null) {
@@ -131,11 +204,22 @@ class SurfaceStore(
                     present = false
                     spec = null
                     currentView = null
+                    staleSpec = null
+                    staleAfterSeconds = null
                     emptyMap()
                 } else revalidated
             } else emptyMap()
-            records[r.surface] = Record(r.revision, present, spec, currentView, statefuls)
-            if (present != r.present || spec != r.spec || currentView != r.currentView)
+            records[r.surface] = Record(
+                r.revision,
+                present,
+                spec,
+                currentView,
+                statefuls,
+                staleSpec,
+                staleAfterSeconds,
+            )
+            if (present != r.present || spec != r.spec || currentView != r.currentView ||
+                staleSpec != r.staleSpec || staleAfterSeconds != r.staleAfterSeconds)
                 recordsDirty = true
         }
         // SPEC 10.2/13.6: a draft belongs to a stateful node of a PRESENT
@@ -171,7 +255,15 @@ class SurfaceStore(
 
     private fun persistedRecords(): List<PersistedRecord> =
         records.map { (surface, r) ->
-            PersistedRecord(surface, r.revision, r.present, r.spec, r.currentView)
+            PersistedRecord(
+                surface,
+                r.revision,
+                r.present,
+                r.spec,
+                r.currentView,
+                r.staleSpec,
+                r.staleAfterSeconds,
+            )
         }
 
     private fun persistDrafts() {
@@ -314,7 +406,9 @@ class SurfaceStore(
 
     fun update(surface: String, revision: Long, spec: JsonObject,
                staleSpec: JsonObject?, currentView: String?,
-               resetIds: JsonArray?): SurfaceResult {
+               resetIds: JsonArray?, staleAfterSeconds: Long? = null): SurfaceResult {
+        if (staleAfterSeconds != null && staleAfterSeconds <= 0)
+            throw ContentInvalid("stale_after_s", "must be a positive integer")
         // SPEC 13.2: validate the entire request before changing state.
         // SPEC 13.4: the namespace decides the SurfaceSpec variant.
         val statefuls: Map<String, JsonObject>
@@ -341,6 +435,43 @@ class SurfaceStore(
                     maxChartPoints = maxChartPoints, maxCanvasOps = maxCanvasOps,
                     maxRichSpans = maxRichSpans, maxTableCells = maxTableCells,
                     nodeVocabulary = nodeVocabulary)
+            }
+            statefuls = emptyMap()
+            reset = emptySet()
+            isMultiView = false
+        } else if (namespace(surface) == "widget") {
+            SpecValidator.validateWidgetSpec(
+                spec,
+                maxCaptureFields = maxCaptureFields,
+                advertisedTypes = widgetNodeTypes,
+                advertisedBuiltins = widgetBuiltins,
+                advertisedFeatures = widgetFeatures,
+                advertisedMembers = widgetMembers,
+                nodeVocabulary = nodeVocabulary,
+                maxNodes = maxWidgetNodes,
+                maxLazyItems = maxWidgetLazyItems,
+                maxNodeDepth = maxWidgetNodeDepth,
+                maxSizeVariants = maxWidgetSizeVariants,
+            )
+            if (currentView != null)
+                throw ContentInvalid("current_view", "not valid for a widget surface")
+            if (resetIds != null && resetIds.isNotEmpty())
+                throw ContentInvalid("reset_input_ids", "a widget surface has no drafts")
+            staleSpec?.let {
+                SpecValidator.validateWidgetSpec(
+                    it,
+                    "stale_spec",
+                    maxCaptureFields = maxCaptureFields,
+                    advertisedTypes = widgetNodeTypes,
+                    advertisedBuiltins = widgetBuiltins,
+                    advertisedFeatures = widgetFeatures,
+                    advertisedMembers = widgetMembers,
+                    nodeVocabulary = nodeVocabulary,
+                    maxNodes = maxWidgetNodes,
+                    maxLazyItems = maxWidgetLazyItems,
+                    maxNodeDepth = maxWidgetNodeDepth,
+                    maxSizeVariants = maxWidgetSizeVariants,
+                )
             }
             statefuls = emptyMap()
             reset = emptySet()
@@ -403,7 +534,15 @@ class SurfaceStore(
             .associateWith { currentValue(surface, it) }
         // Install a fresh candidate rather than mutating RECORD in place. It
         // remains the complete rollback value until the durable commit wins.
-        val next = Record(revision, true, spec, nextCurrentView, statefuls)
+        val next = Record(
+            revision,
+            true,
+            spec,
+            nextCurrentView,
+            statefuls,
+            staleSpec,
+            staleAfterSeconds,
+        )
         val wasRecordsDirty = recordsDirty
         records[surface] = next
         recordsDirty = true
@@ -443,7 +582,15 @@ class SurfaceStore(
             return SurfaceResult("stale", floor, record?.present ?: false)
         if (record == null && records.size.toLong() >= maxSurfaceIds)
             throw ContentInvalid("surface", "surface-limit")
-        val next = Record(revision, false, null, null, emptyMap())
+        val next = Record(
+            revision,
+            false,
+            null,
+            null,
+            emptyMap(),
+            null,
+            null,
+        )
         val wasRecordsDirty = recordsDirty
         records[surface] = next
         recordsDirty = true

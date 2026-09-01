@@ -57,19 +57,46 @@ class CompanionEngine(
     private val config: CompanionConfig,
     /** Shared across connections: surface state outlives a session (13.5). */
     val surfaces: SurfaceStore = SurfaceStore(
-        config.limits.reqLong("max_surfaces"), config.limits.reqLong("max_surface_ids"),
-        config.limits.longOr("max_capture_fields", 64),
-        config.limits.longOr("max_chart_points", Long.MAX_VALUE),
-        config.limits.longOr("max_canvas_ops", Long.MAX_VALUE),
-        config.limits.longOr("max_rich_spans", Long.MAX_VALUE),
-        config.limits.longOr("max_table_cells", Long.MAX_VALUE),
-        nodeTypesFromProfiles(config.surfaceProfiles, "app"),
-        nodeTypesFromProfiles(config.surfaceProfiles, "notification"),
-        builtinsFromProfiles(config.surfaceProfiles, "app"),
-        builtinsFromProfiles(config.surfaceProfiles, "notification"),
-        featuresFromProfiles(config.surfaceProfiles, "app"),
-        featuresFromProfiles(config.surfaceProfiles, "notification"),
-        config.nodeVocabulary),
+        maxSurfaces = config.limits.reqLong("max_surfaces"),
+        maxSurfaceIds = config.limits.reqLong("max_surface_ids"),
+        maxCaptureFields = config.limits.longOr("max_capture_fields", 64),
+        maxChartPoints = config.limits.longOr("max_chart_points", Long.MAX_VALUE),
+        maxCanvasOps = config.limits.longOr("max_canvas_ops", Long.MAX_VALUE),
+        maxRichSpans = config.limits.longOr("max_rich_spans", Long.MAX_VALUE),
+        maxTableCells = config.limits.longOr("max_table_cells", Long.MAX_VALUE),
+        appNodeTypes = nodeTypesFromProfiles(config.surfaceProfiles, "app"),
+        notificationNodeTypes = nodeTypesFromProfiles(
+            config.surfaceProfiles,
+            "notification",
+        ),
+        widgetNodeTypes = nodeTypesFromProfiles(config.surfaceProfiles, "widget"),
+        appBuiltins = builtinsFromProfiles(config.surfaceProfiles, "app"),
+        notificationBuiltins = builtinsFromProfiles(
+            config.surfaceProfiles,
+            "notification",
+        ),
+        widgetBuiltins = builtinsFromProfiles(config.surfaceProfiles, "widget"),
+        appFeatures = featuresFromProfiles(config.surfaceProfiles, "app"),
+        notificationFeatures = featuresFromProfiles(
+            config.surfaceProfiles,
+            "notification",
+        ),
+        widgetFeatures = featuresFromProfiles(config.surfaceProfiles, "widget"),
+        widgetMembers = memberSupportFromProfiles(config.surfaceProfiles, "widget"),
+        maxWidgetNodes = targetLimitsFromProfiles(config.surfaceProfiles, "widget")
+            ?.longOr("max_nodes", MAX_WIDGET_NODES.toLong())?.toInt()
+            ?: MAX_WIDGET_NODES,
+        maxWidgetLazyItems = targetLimitsFromProfiles(config.surfaceProfiles, "widget")
+            ?.longOr("max_lazy_items", MAX_WIDGET_LAZY_ITEMS.toLong())?.toInt()
+            ?: MAX_WIDGET_LAZY_ITEMS,
+        maxWidgetNodeDepth = targetLimitsFromProfiles(config.surfaceProfiles, "widget")
+            ?.longOr("max_node_depth", MAX_WIDGET_NODE_DEPTH.toLong())?.toInt()
+            ?: MAX_WIDGET_NODE_DEPTH,
+        maxWidgetSizeVariants = targetLimitsFromProfiles(config.surfaceProfiles, "widget")
+            ?.longOr("max_size_variants", MAX_WIDGET_SIZE_VARIANTS.toLong())?.toInt()
+            ?: MAX_WIDGET_SIZE_VARIANTS,
+        nodeVocabulary = config.nodeVocabulary,
+    ),
     /** Shared across connections AND restarts: the SPEC 15 durable queue. */
     val queue: DurableQueue = DurableQueue(
         MemoryQueueStore(),
@@ -1223,11 +1250,29 @@ class CompanionEngine(
                     })
         }
         try {
+            val staleAfterSeconds = if ("stale_after_s" in params) {
+                val value = integralLongOrNull(params["stale_after_s"])
+                if (value == null || value <= 0L) {
+                    return respondError(
+                        id,
+                        1201,
+                        "Invalid content",
+                        "content-invalid",
+                        buildJsonObject {
+                            put("path", "stale_after_s")
+                            put("reason", "must be a positive integer")
+                        },
+                    )
+                }
+                value
+            } else null
             val result = surfaces.update(
                 surface, revision, spec,
                 params.objOrNull("stale_spec"),
                 params.stringOrNull("current_view"),
-                params.arrOrNull("reset_input_ids"))
+                params.arrOrNull("reset_input_ids"),
+                staleAfterSeconds,
+            )
             respondResult(id, buildJsonObject {
                 put("status", result.status)
                 put("revision", result.revision)
@@ -3120,6 +3165,11 @@ class CompanionEngine(
             val profile = requireNotNull(config.surfaceProfiles.objOrNull(target)) {
                 "surface_profiles.$target must be an object"
             }
+            require(profile.keys.all {
+                it in RENDERER_PROFILE_REQUIRED || it in RENDERER_PROFILE_OPTIONAL
+            }) {
+                "surface_profiles.$target contains an unknown member"
+            }
             for (member in listOf("node_types", "builtins", "features", "extensions")) {
                 val array = requireNotNull(profile.arrOrNull(member)) {
                     "surface_profiles.$target.$member is required"
@@ -3138,6 +3188,112 @@ class CompanionEngine(
                         WireLimits.MAX_IDENTIFIER_OCTETS
                 }) {
                     "surface_profiles.$target.$member contains an invalid identifier"
+                }
+            }
+            profile.objOrNull("members")?.let { members ->
+                require(members.keys == RENDERER_MEMBER_SUPPORT_REQUIRED) {
+                    "surface_profiles.$target.members must contain exactly " +
+                        RENDERER_MEMBER_SUPPORT_REQUIRED.sorted()
+                }
+                fun exactNames(member: String): Set<String> {
+                    val array = requireNotNull(members.arrOrNull(member)) {
+                        "surface_profiles.$target.members.$member must be an array"
+                    }
+                    val names = array.map { element ->
+                        requireNotNull(element.asStringOrNull()) {
+                            "surface_profiles.$target.members.$member entries must be strings"
+                        }
+                    }
+                    require(names.distinct().size == names.size) {
+                        "surface_profiles.$target.members.$member entries must be distinct"
+                    }
+                    require(names.all(identifier::matches)) {
+                        "surface_profiles.$target.members.$member has an invalid name"
+                    }
+                    return names.toSet()
+                }
+                val universal = exactNames("universal")
+                require(universal.all { it in UNIVERSAL_NODE_ATTRIBUTES }) {
+                    "surface_profiles.$target.members.universal names an unknown member"
+                }
+                val semantics = exactNames("semantics")
+                require(semantics.all {
+                    it in SEMANTICS_SCHEMA.required || it in SEMANTICS_SCHEMA.optional
+                }) {
+                    "surface_profiles.$target.members.semantics names an unknown member"
+                }
+                require("semantics" !in universal || semantics.isNotEmpty()) {
+                    "surface_profiles.$target cannot advertise empty Semantics support"
+                }
+                val surface = exactNames("surface")
+                val nodeMembers = requireNotNull(members.objOrNull("nodes")) {
+                    "surface_profiles.$target.members.nodes must be an object"
+                }
+                val advertisedTypes = requireNotNull(
+                    nodeTypesFromProfiles(config.surfaceProfiles, target),
+                )
+                require(nodeMembers.keys == advertisedTypes) {
+                    "surface_profiles.$target.members.nodes must name every advertised node"
+                }
+                nodeMembers.forEach { (nodeType, value) ->
+                    val array = value as? JsonArray
+                        ?: error(
+                            "surface_profiles.$target.members.nodes.$nodeType must be an array",
+                        )
+                    val names = array.map { element ->
+                        requireNotNull(element.asStringOrNull()) {
+                            "surface_profiles.$target.members.nodes.$nodeType entries must be strings"
+                        }
+                    }
+                    require(names.distinct().size == names.size) {
+                        "surface_profiles.$target.members.nodes.$nodeType entries must be distinct"
+                    }
+                    config.nodeVocabulary.schema[nodeType]?.let { row ->
+                        require(row.required.all { it in names }) {
+                            "surface_profiles.$target member support omits a required $nodeType member"
+                        }
+                        require(names.all { it in row.required || it in row.optional }) {
+                            "surface_profiles.$target member support names an unknown $nodeType member"
+                        }
+                    }
+                }
+                if (target == "widget") {
+                    require(WIDGET_SURFACE_REQUIRED.all { it in surface }) {
+                        "surface_profiles.widget member support omits a required wrapper member"
+                    }
+                    require(surface.all {
+                        it in WIDGET_SURFACE_REQUIRED || it in WIDGET_SURFACE_OPTIONAL
+                    }) {
+                        "surface_profiles.widget names an unknown wrapper member"
+                    }
+                }
+            }
+            profile.objOrNull("limits")?.let { limits ->
+                require(limits.keys.all { it in RENDERER_PROFILE_LIMIT_MEMBERS }) {
+                    "surface_profiles.$target.limits contains an unknown member"
+                }
+                limits.forEach { (name, value) ->
+                    require((integralLongOrNull(value) ?: 0L) > 0L) {
+                        "surface_profiles.$target.limits.$name must be positive"
+                    }
+                }
+                if (target == "widget") {
+                    require(limits.keys == RENDERER_PROFILE_LIMIT_MEMBERS) {
+                        "surface_profiles.widget.limits must contain every widget limit"
+                    }
+                    require(limits.reqLong("max_nodes") <= MAX_WIDGET_NODES &&
+                        limits.reqLong("max_lazy_items") <= MAX_WIDGET_LAZY_ITEMS &&
+                        limits.reqLong("max_node_depth") <= MAX_WIDGET_NODE_DEPTH &&
+                        limits.reqLong("max_size_variants") <= MAX_WIDGET_SIZE_VARIANTS &&
+                        limits.reqLong("max_remote_views_bytes") <=
+                            MAX_WIDGET_REMOTE_VIEWS_BYTES) {
+                        "surface_profiles.widget.limits exceeds the fixed widget ceiling"
+                    }
+                }
+            }
+            if (target == "widget") {
+                require("members" in profile && "limits" in profile) {
+                    "surface_profiles.widget requires exact members and limits"
                 }
             }
         }

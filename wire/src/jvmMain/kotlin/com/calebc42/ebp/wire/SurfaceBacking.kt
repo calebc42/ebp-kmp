@@ -27,6 +27,8 @@ data class PersistedRecord(
     val present: Boolean,
     val spec: JsonObject?,
     val currentView: String?,
+    val staleSpec: JsonObject? = null,
+    val staleAfterSeconds: Long? = null,
 )
 
 /**
@@ -92,6 +94,10 @@ class FileSurfaceBacking(
                 present = o.reqBoolean("present"),
                 spec = o.objOrNull("spec"),
                 currentView = if ("current_view" in o) o.reqString("current_view") else null,
+                staleSpec = o.objOrNull("stale_spec"),
+                staleAfterSeconds = if ("stale_after_s" in o) {
+                    o.reqLong("stale_after_s")
+                } else null,
             )
         } ?: emptyList()
         // Drafts come from the split file. Backward compat: a records file
@@ -131,6 +137,8 @@ class FileSurfaceBacking(
                 // where org.json's removed the member.
                 r.spec?.let { put("spec", it) }
                 r.currentView?.let { put("current_view", it) }
+                r.staleSpec?.let { put("stale_spec", it) }
+                r.staleAfterSeconds?.let { put("stale_after_s", it) }
             }
         })
         writeAtomic(file, buildJsonObject { put("records", arr) })

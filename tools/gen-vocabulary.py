@@ -304,6 +304,30 @@ val CORE_NODE_SET: Set<String> = {kt_set(contract["core_node_set"])}
 val UNIVERSAL_NODE_ATTRIBUTES: Set<String> = {kt_set(contract["universal_node_attributes"])}
 
 const val MAX_SEMANTIC_ACTIONS_PER_NODE = {contract["limits"]["fixed"]["max_semantic_actions_per_node"]}
+const val MAX_WIDGET_NODES = {contract["limits"]["fixed"]["max_widget_nodes"]}
+const val MAX_WIDGET_LAZY_ITEMS = {contract["limits"]["fixed"]["max_widget_lazy_items"]}
+const val MAX_WIDGET_NODE_DEPTH = {contract["limits"]["fixed"]["max_widget_node_depth"]}
+const val MAX_WIDGET_SIZE_VARIANTS = {contract["limits"]["fixed"]["max_widget_size_variants"]}
+const val MAX_WIDGET_REMOTE_VIEWS_BYTES = {contract["limits"]["fixed"]["max_widget_remote_views_bytes"]}
+const val MAX_SWIPE_ACTIONS_PER_SIDE = {contract["limits"]["fixed"]["max_swipe_actions_per_side"]}
+
+val RENDERER_PROFILE_REQUIRED: Set<String> = {kt_set(contract["renderer_profile_schema"]["required"])}
+val RENDERER_PROFILE_OPTIONAL: Set<String> = {kt_set(contract["renderer_profile_schema"]["optional"])}
+val RENDERER_MEMBER_SUPPORT_REQUIRED: Set<String> = {kt_set(contract["renderer_profile_schema"]["members"]["required"])}
+val RENDERER_PROFILE_LIMIT_MEMBERS: Set<String> = {kt_set(contract["renderer_profile_schema"]["limits"]["optional"])}
+
+val WIDGET_SURFACE_REQUIRED: Set<String> = {kt_set(contract["surface_spec_variants"]["widget"]["required"])}
+val WIDGET_SURFACE_OPTIONAL: Set<String> = {kt_set(contract["surface_spec_variants"]["widget"]["optional"])}
+val WIDGET_SIZE_VARIANT_REQUIRED: Set<String> = {kt_set(contract["widget_size_variant_schema"]["required"])}
+val WIDGET_SIZE_VARIANT_OPTIONAL: Set<String> = {kt_set(contract["widget_size_variant_schema"]["optional"])}
+
+val LEGACY_SWIPE_REQUIRED: Set<String> = {kt_set(contract["swipe_schema"]["legacy"]["required"])}
+val LEGACY_SWIPE_OPTIONAL: Set<String> = {kt_set(contract["swipe_schema"]["legacy"]["optional"])}
+val RICH_SWIPE_REQUIRED: Set<String> = {kt_set(contract["swipe_schema"]["rich"]["required"])}
+val RICH_SWIPE_OPTIONAL: Set<String> = {kt_set(contract["swipe_schema"]["rich"]["optional"])}
+val SWIPE_ACTION_REQUIRED: Set<String> = {kt_set(contract["swipe_schema"]["action"]["required"])}
+val SWIPE_ACTION_OPTIONAL: Set<String> = {kt_set(contract["swipe_schema"]["action"]["optional"])}
+const val SWIPE_COMMIT_MAX_ACTIONS = {contract["swipe_schema"]["rich"]["commit_max_actions"]}
 
 val SEMANTICS_SCHEMA = SemanticObjectRow(
     required = {kt_set(semantics["required"])},

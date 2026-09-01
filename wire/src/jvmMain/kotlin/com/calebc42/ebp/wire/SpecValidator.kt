@@ -120,9 +120,13 @@ object SpecValidator {
         // SPEC 22.4: member-gating features for this target. null preserves
         // the allow-all convention used by unit fixtures without a profile.
         val advertisedFeatures: Set<String>? = null,
+        val advertisedMembers: ProfileMemberSupport? = null,
         // Renderer-owned optional schemas are supplied by the endpoint's
         // composition root. The EBP contract and wire module register none.
         val nodeVocabulary: NodeVocabulary,
+        val maxNodes: Int = WireLimits.MAX_NODES_PER_SNAPSHOT,
+        val maxNodeDepth: Int = WireLimits.MAX_NODE_DEPTH,
+        val maxLazyItems: Int = WireLimits.MAX_CHILDREN_PER_NODE,
     ) {
         val ids = mutableSetOf<String>()
         val statefuls = mutableMapOf<String, JsonObject>()
@@ -159,11 +163,16 @@ object SpecValidator {
         advertisedBuiltins: Set<String>? = null,
         advertisedFeatures: Set<String>? = null,
         nodeVocabulary: NodeVocabulary = EBP_NODE_VOCABULARY,
+        advertisedMembers: ProfileMemberSupport? = null,
+        maxNodes: Int = WireLimits.MAX_NODES_PER_SNAPSHOT,
+        maxNodeDepth: Int = WireLimits.MAX_NODE_DEPTH,
+        maxLazyItems: Int = WireLimits.MAX_CHILDREN_PER_NODE,
     ): Map<String, JsonObject> {
         if (spec !is JsonObject) throw ContentInvalid(path, "spec must be an object")
         val ctx = Ctx(maxCaptureFields, maxChartPoints, maxCanvasOps,
             maxRichSpans, maxTableCells, advertisedTypes, advertisedBuiltins,
-            advertisedFeatures, nodeVocabulary)
+            advertisedFeatures, advertisedMembers, nodeVocabulary,
+            maxNodes, maxNodeDepth, maxLazyItems)
         if ("views" in spec) {
             val views = spec.objOrNull("views")
                 ?: throw ContentInvalid("$path.views", "views must be an object")
@@ -183,6 +192,11 @@ object SpecValidator {
                 throw ContentInvalid(path, "surface root must be a node or a multi-view object")
             walkNode(spec, path, ctx)
         }
+        return finishDocument(ctx)
+    }
+
+    /** Resolve whole-document references only after every atomic root was walked. */
+    private fun finishDocument(ctx: Ctx): Map<String, JsonObject> {
         // SPEC 14.1: each capture name resolves to exactly one stateful node
         // in the document. IDs are unique across the document (SPEC 16.1),
         // so membership in `statefuls` is the exact resolution test.
@@ -310,6 +324,121 @@ object SpecValidator {
                 ?: throw ContentInvalid("$path.meta", "must be an object")
             validateNotificationMeta(meta, "$path.meta")
         }
+    }
+
+    /**
+     * Amendment #183 widget wrapper. Every adaptive body is one atomic
+     * document, so IDs, node count, depth, actions, and aggregate limits are
+     * shared even though only one body is presented at a time.
+     */
+    fun validateWidgetSpec(
+        spec: JsonElement?,
+        path: String = "spec",
+        maxCaptureFields: Long = 64,
+        advertisedTypes: Set<String>? = null,
+        advertisedBuiltins: Set<String>? = null,
+        advertisedFeatures: Set<String>? = null,
+        nodeVocabulary: NodeVocabulary = EBP_NODE_VOCABULARY,
+        advertisedMembers: ProfileMemberSupport? = null,
+        maxNodes: Int = MAX_WIDGET_NODES,
+        maxLazyItems: Int = MAX_WIDGET_LAZY_ITEMS,
+        maxNodeDepth: Int = MAX_WIDGET_NODE_DEPTH,
+        maxSizeVariants: Int = MAX_WIDGET_SIZE_VARIANTS,
+    ) {
+        val wrapper = spec as? JsonObject
+            ?: throw ContentInvalid(path, "widget spec must be an object")
+        val allowed = WIDGET_SURFACE_REQUIRED + WIDGET_SURFACE_OPTIONAL
+        for (member in WIDGET_SURFACE_REQUIRED) {
+            if (member !in wrapper)
+                throw ContentInvalid(path, "widget spec missing $member")
+        }
+        for (member in wrapper.keys) {
+            if (member !in allowed)
+                throw ContentInvalid("$path.$member", "unknown widget member")
+            if (advertisedMembers != null && member !in advertisedMembers.surface)
+                throw ContentInvalid(
+                    "$path.$member",
+                    "surface member is not advertised by the widget profile",
+                )
+        }
+        if (wrapper.stringOrNull("title") == null)
+            throw ContentInvalid("$path.title", "must be a string")
+
+        val ctx = Ctx(
+            maxCaptureFields = maxCaptureFields,
+            maxChartPoints = Long.MAX_VALUE,
+            maxCanvasOps = Long.MAX_VALUE,
+            maxRichSpans = Long.MAX_VALUE,
+            maxTableCells = Long.MAX_VALUE,
+            advertisedTypes = advertisedTypes,
+            advertisedBuiltins = advertisedBuiltins,
+            advertisedFeatures = advertisedFeatures,
+            advertisedMembers = advertisedMembers,
+            nodeVocabulary = nodeVocabulary,
+            maxNodes = maxNodes,
+            maxNodeDepth = maxNodeDepth,
+            maxLazyItems = maxLazyItems,
+        )
+        fun walkRoot(value: JsonElement?, rootPath: String) {
+            val node = value as? JsonObject
+                ?: throw ContentInvalid(rootPath, "must be a Node")
+            if (node.stringOrNull("t") == null)
+                throw ContentInvalid(rootPath, "node missing discriminator t")
+            walkNode(node, rootPath, ctx)
+        }
+        walkRoot(wrapper["body"], "$path.body")
+        wrapper["empty"]?.let { walkRoot(it, "$path.empty") }
+        wrapper["header_action"]?.let { action ->
+            validateAction(
+                action as? JsonObject
+                    ?: throw ContentInvalid(
+                        "$path.header_action",
+                        "must be an ActionDescriptor",
+                    ),
+                "$path.header_action",
+                "header_action",
+                ctx,
+            )
+        }
+        wrapper["size_variants"]?.let { value ->
+            val variants = value as? JsonArray
+                ?: throw ContentInvalid("$path.size_variants", "must be an array")
+            if (variants.size > maxSizeVariants)
+                throw ContentInvalid(
+                    "$path.size_variants",
+                    "exceeds target max_size_variants",
+                )
+            val variantAllowed =
+                WIDGET_SIZE_VARIANT_REQUIRED + WIDGET_SIZE_VARIANT_OPTIONAL
+            variants.forEachIndexed { index, element ->
+                val variantPath = "$path.size_variants[$index]"
+                val variant = element as? JsonObject
+                    ?: throw ContentInvalid(variantPath, "must be an object")
+                for (member in WIDGET_SIZE_VARIANT_REQUIRED) {
+                    if (member !in variant)
+                        throw ContentInvalid(variantPath, "missing $member")
+                }
+                for (member in variant.keys) {
+                    if (member !in variantAllowed)
+                        throw ContentInvalid(
+                            "$variantPath.$member",
+                            "unknown WidgetSizeVariant member",
+                        )
+                }
+                for (dimension in listOf("min_width", "min_height")) {
+                    val number = variant[dimension]?.asDoubleOrNull()
+                    if (number == null || !number.isFinite() || number < 0.0)
+                        throw ContentInvalid(
+                            "$variantPath.$dimension",
+                            "must be a non-negative dp number",
+                        )
+                }
+                walkRoot(variant["body"], "$variantPath.body")
+            }
+        }
+        val statefuls = finishDocument(ctx)
+        if (statefuls.isNotEmpty())
+            throw ContentInvalid(path, "stateful nodes are prohibited in widget surfaces")
     }
 
     private val PRIORITIES = setOf("min", "low", "default", "high", "max")
@@ -515,12 +644,12 @@ object SpecValidator {
     ) {
         // SPEC 4.5: at most 10,000 nodes in one surface snapshot; count
         // before descending so an over-limit tree rejects, not renders.
-        if (++ctx.nodeCount > WireLimits.MAX_NODES_PER_SNAPSHOT)
-            throw ContentInvalid(path, "exceeds max_nodes_per_snapshot")
+        if (++ctx.nodeCount > ctx.maxNodes)
+            throw ContentInvalid(path, "exceeds max_nodes_per_snapshot or target max_nodes")
         // SPEC 4.5/16.1 (amendment #108): and at most 20 levels deep — the
         // receiver's JSON-container limit is not a budget a sender can spend,
         // because host encoders cap well below it.
-        if (++ctx.nodeDepth > WireLimits.MAX_NODE_DEPTH) {
+        if (++ctx.nodeDepth > ctx.maxNodeDepth) {
             ctx.nodeDepth--
             throw ContentInvalid(path, "node-depth")
         }
@@ -583,6 +712,11 @@ object SpecValidator {
                                 throw ContentInvalid(
                                     "$path.children",
                                     "exceeds max_children_per_node",
+                                )
+                            if (t == "lazy_column" && children.size > ctx.maxLazyItems)
+                                throw ContentInvalid(
+                                    "$path.children",
+                                    "exceeds target max_lazy_items",
                                 )
                             for (index in children.indices) {
                                 val element = children[index] as? JsonObject
@@ -658,9 +792,29 @@ object SpecValidator {
         ctx: Ctx,
     ): SemanticCollectionBounds? {
         if ("semantics" !in node) return null
+        ctx.advertisedMembers?.let { support ->
+            if ("semantics" !in support.universal) {
+                throw ContentInvalid(
+                    "$path.semantics",
+                    "member is not advertised by the target profile",
+                )
+            }
+        }
         val semantics = node.objOrNull("semantics")
             ?: throw ContentInvalid("$path.semantics", "must be an object")
         val semanticPath = "$path.semantics"
+
+        ctx.advertisedMembers?.let { support ->
+            val known = SEMANTICS_SCHEMA.required + SEMANTICS_SCHEMA.optional
+            semantics.keys.filter { it in known && it !in support.semantics }
+                .firstOrNull()
+                ?.let { member ->
+                    throw ContentInvalid(
+                        "$semanticPath.$member",
+                        "member is not advertised by the target profile",
+                    )
+                }
+        }
 
         for ((member, fieldType) in SEMANTICS_SCHEMA.fieldTypes) {
             if (member !in semantics) continue
@@ -1054,6 +1208,28 @@ object SpecValidator {
         if (ctx.advertisedTypes != null && t !in ctx.advertisedTypes) return
         val row = ctx.nodeVocabulary.schema[t]
             ?: return // SPEC 16.2: unknown types degrade
+        ctx.advertisedMembers?.let { support ->
+            val nodeMembers = support.nodes[t]
+                ?: throw ContentInvalid(path, "target member map omits node type $t")
+            for (member in node.keys) {
+                if (member == "t") continue
+                when {
+                    member in UNIVERSAL_NODE_ATTRIBUTES &&
+                        member !in support.universal ->
+                        throw ContentInvalid(
+                            "$path.$member",
+                            "universal member is not advertised by the target profile",
+                        )
+                    member in row.required || member in row.optional ->
+                        if (member !in nodeMembers) {
+                            throw ContentInvalid(
+                                "$path.$member",
+                                "node member is not advertised by the target profile",
+                            )
+                        }
+                }
+            }
+        }
         for (req in row.required)
             if (req !in node)
                 throw ContentInvalid(path, "$t missing required $req")
@@ -1942,11 +2118,90 @@ object SpecValidator {
     }
 
     private fun validateSwipeSide(side: JsonObject, path: String, sideKey: String, ctx: Ctx) {
-        if ("label" !in side || "on_trigger" !in side)
-            throw ContentInvalid(path, "swipe side needs label and on_trigger")
-        val trigger = side.objOrNull("on_trigger")
-            ?: throw ContentInvalid("$path.on_trigger", "must be an ActionDescriptor")
-        validateAction(trigger, "$path.on_trigger", "$sideKey.on_trigger", ctx)
+        fun validateSwipeAction(action: JsonObject, actionPath: String): String {
+            val allowed = SWIPE_ACTION_REQUIRED + SWIPE_ACTION_OPTIONAL
+            for (member in action.keys) {
+                if (member !in allowed)
+                    throw ContentInvalid(
+                        "$actionPath.$member",
+                        "unknown SwipeAction member",
+                    )
+            }
+            for (member in SWIPE_ACTION_REQUIRED) {
+                if (member !in action)
+                    throw ContentInvalid(actionPath, "missing required $member")
+            }
+            val label = action.stringOrNull("label")
+            if (label == null || label.isEmpty())
+                throw ContentInvalid("$actionPath.label", "must be a non-empty string")
+            if ("icon" in action) {
+                val icon = action.stringOrNull("icon")
+                if (icon == null || !IDENTIFIER.matches(icon) ||
+                    icon.toByteArray(Charsets.UTF_8).size >
+                        WireLimits.MAX_IDENTIFIER_OCTETS)
+                    throw ContentInvalid("$actionPath.icon", "must be an identifier")
+            }
+            if ("color" in action && action.stringOrNull("color") == null)
+                throw ContentInvalid("$actionPath.color", "must be a Color string")
+            val trigger = action.objOrNull("on_trigger")
+                ?: throw ContentInvalid(
+                    "$actionPath.on_trigger",
+                    "must be an ActionDescriptor",
+                )
+            if ("action" !in trigger)
+                throw ContentInvalid(
+                    "$actionPath.on_trigger",
+                    "swipe hooks require a remote action",
+                )
+            validateAction(
+                trigger,
+                "$actionPath.on_trigger",
+                "$sideKey.on_trigger",
+                ctx,
+            )
+            return label
+        }
+
+        if ("actions" !in side) {
+            val allowed = LEGACY_SWIPE_REQUIRED + LEGACY_SWIPE_OPTIONAL
+            for (member in side.keys) {
+                if (member !in allowed)
+                    throw ContentInvalid("$path.$member", "unknown legacy swipe member")
+            }
+            validateSwipeAction(side, path)
+            return
+        }
+
+        val allowed = RICH_SWIPE_REQUIRED + RICH_SWIPE_OPTIONAL
+        for (member in side.keys) {
+            if (member !in allowed)
+                throw ContentInvalid("$path.$member", "unknown rich swipe member")
+        }
+        val actions = side.arrOrNull("actions")
+            ?: throw ContentInvalid("$path.actions", "must be an array")
+        if (actions.isEmpty() || actions.size > MAX_SWIPE_ACTIONS_PER_SIDE)
+            throw ContentInvalid(
+                "$path.actions",
+                "must contain 1..$MAX_SWIPE_ACTIONS_PER_SIDE actions",
+            )
+        if ("commit" in side && side.boolOrNull("commit") == null)
+            throw ContentInvalid("$path.commit", "must be a boolean")
+        if (side.boolOr("commit") && actions.size > SWIPE_COMMIT_MAX_ACTIONS)
+            throw ContentInvalid(
+                "$path.commit",
+                "deep commit supports at most $SWIPE_COMMIT_MAX_ACTIONS actions",
+            )
+        val labels = mutableSetOf<String>()
+        actions.forEachIndexed { index, element ->
+            val action = element as? JsonObject
+                ?: throw ContentInvalid("$path.actions[$index]", "must be a SwipeAction")
+            val label = validateSwipeAction(action, "$path.actions[$index]")
+            if (!labels.add(label))
+                throw ContentInvalid(
+                    "$path.actions[$index].label",
+                    "duplicate swipe action label",
+                )
+        }
     }
 
     /** SPEC 14.1-14.3: the discriminated ActionDescriptor schema. */
