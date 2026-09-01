@@ -20,15 +20,18 @@ class ReminderTest {
 
     private fun engine(out: MutableList<JsonObject>, maxReminders: Long = 256,
                        grant: Boolean = true,
-                       offlineWakeGranted: Boolean = false): CompanionEngine {
+                       offlineWakeGranted: Boolean = false,
+                       reminderActionsGranted: Boolean = false): CompanionEngine {
         val wants = if (grant) {
             listOf("reminders.owner") +
-                if (offlineWakeGranted) listOf("offline.wake") else emptyList()
+                (if (offlineWakeGranted) listOf("offline.wake") else emptyList()) +
+                (if (reminderActionsGranted) listOf("reminders.actions") else emptyList())
         } else {
             emptyList()
         }
         val supported = setOf("reminders.owner") +
-            if (offlineWakeGranted) setOf("offline.wake") else emptySet()
+            (if (offlineWakeGranted) setOf("offline.wake") else emptySet()) +
+            (if (reminderActionsGranted) setOf("reminders.actions") else emptySet())
         val engine = CompanionEngine(CompanionConfig(
             serverName = "kat", serverVersion = "1",
             pairings = mapOf(katPid to katToken),
@@ -126,7 +129,7 @@ class ReminderTest {
                 put("action", "a.b")
                 put("capture_fields", JsonArray(listOf(JsonPrimitive("note"))))
             })))
-        assertEquals("not available without an app surface", reason(reminder("x", 1,
+        assertEquals("requires reminders.actions grant", reason(reminder("x", 1,
             buildJsonObject {
                 put("action", "a.b")
                 put("open_surface", "app:agenda")
@@ -229,6 +232,101 @@ class ReminderTest {
         val before = out.size
         engine.dispatchReminderTap("org.a", "z")
         assertEquals(before, out.size)
+    }
+
+    @Test
+    fun orderedActionsAreCapabilityGatedAndInjectReminderIdentity() {
+        val action = buildJsonObject {
+            put("label", "Complete")
+            put("dismiss", true)
+            putJsonObject("on_tap") {
+                put("action", "agenda.complete")
+                put("when_offline", "queue")
+                put("ttl_s", 3600)
+                put("open_surface", "app:agenda")
+                putJsonObject("args") { put("item", "opaque") }
+            }
+        }
+        val actionable = reminder("x", 1000).with(
+            "actions",
+            JsonArray(listOf(action)),
+        )
+
+        val denied = mutableListOf<JsonObject>()
+        assertEquals(
+            "requires reminders.actions grant",
+            set(engine(denied), denied, "org.a", actionable)
+                .reqObj("error").reqObj("data").reqString("reason"),
+        )
+
+        val out = mutableListOf<JsonObject>()
+        val engine = engine(out, reminderActionsGranted = true)
+        assertEquals(
+            1L,
+            set(engine, out, "org.a", actionable)
+                .reqObj("result").reqLong("count"),
+        )
+        var status: String? = null
+        assertTrue(
+            routeReminderAction(
+                engine.reminders,
+                engine.queue,
+                262_144,
+                "org.a",
+                "x",
+                0,
+                expectedAtMs = 1000,
+                live = engine,
+            ) { value, _ -> status = value },
+        )
+        assertEquals("queued", status)
+        val queued = engine.queue.head()!!.reqObj("event")
+        assertEquals("agenda.complete", queued.reqString("action"))
+        assertEquals("opaque", queued.reqObj("args").reqString("item"))
+        assertEquals("org.a", queued.reqObj("args").reqString("owner"))
+        assertEquals("x", queued.reqObj("args").reqString("reminder_id"))
+        assertFalse(
+            routeReminderAction(
+                engine.reminders,
+                engine.queue,
+                262_144,
+                "org.a",
+                "x",
+                0,
+                expectedAtMs = 999,
+                live = engine,
+            ),
+        )
+    }
+
+    @Test
+    fun reminderActionsRejectInjectedArgsAndCapturedFields() {
+        fun reminderAction(onTap: JsonObject) = reminder("x", 1).with(
+            "actions",
+            JsonArray(listOf(buildJsonObject {
+                put("label", "Action")
+                put("on_tap", onTap)
+            })),
+        )
+        val out = mutableListOf<JsonObject>()
+        val engine = engine(out, reminderActionsGranted = true)
+        fun reason(reminder: JsonObject) = set(engine, out, "org.a", reminder)
+            .reqObj("error").reqObj("data").reqString("reason")
+
+        assertEquals(
+            "conflicts with injected value",
+            reason(reminderAction(buildJsonObject {
+                put("action", "agenda.complete")
+                putJsonObject("args") { put("owner", "forged") }
+            })),
+        )
+        assertEquals(
+            "must not capture_fields",
+            reason(reminderAction(buildJsonObject {
+                put("action", "agenda.complete")
+                put("capture_fields", JsonArray(listOf(JsonPrimitive("field"))))
+            })),
+        )
     }
 
     @Test

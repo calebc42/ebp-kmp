@@ -171,6 +171,7 @@ object SpecValidator {
         path: String,
         injectedMembers: Set<String> = emptySet(),
         offlineWakeGranted: Boolean = false,
+        allowOpenSurface: Boolean = false,
     ) {
         if ("action" !in descriptor || "builtin" in descriptor)
             throw ContentInvalid(path, "must be a remote ActionDescriptor")
@@ -179,6 +180,7 @@ object SpecValidator {
             path,
             injectedMembers,
             offlineWakeGranted = offlineWakeGranted,
+            allowOpenSurface = allowOpenSurface,
         )
     }
 
@@ -194,13 +196,14 @@ object SpecValidator {
         advertisedBuiltins: Set<String>? = null,
         advertisedFeatures: Set<String>? = null,
         offlineWakeGranted: Boolean = false,
+        allowOpenSurface: Boolean = false,
     ) {
         if ("capture_fields" in descriptor)
             throw ContentInvalid("$path.capture_fields", "not available without a surface")
         // SPEC 14.1: open_surface is interpreted only after an action from an
         // admitted app target passes occurrence sizing and durable admission.
         // A persisted platform slot has no app target or admitted revision.
-        if ("open_surface" in descriptor)
+        if ("open_surface" in descriptor && !allowOpenSurface)
             throw ContentInvalid("$path.open_surface", "not available without an app surface")
         descriptor.objOrNull("args")?.let { args ->
             for (member in injectedMembers) if (member in args)
@@ -218,7 +221,9 @@ object SpecValidator {
             maxTableCells = Long.MAX_VALUE,
             advertisedTypes = null,
             advertisedBuiltins = advertisedBuiltins,
-            advertisedFeatures = advertisedFeatures,
+            advertisedFeatures = if (allowOpenSurface)
+                (advertisedFeatures ?: emptySet()) + "action.open_surface"
+            else advertisedFeatures,
             nodeVocabulary = EBP_NODE_VOCABULARY,
             offlineWakeGranted = offlineWakeGranted,
         )
@@ -634,6 +639,8 @@ object SpecValidator {
         a: JsonObject,
         path: String,
         offlineWakeGranted: Boolean,
+        injectedMembers: Set<String> = emptySet(),
+        allowOpenSurface: Boolean = false,
     ) {
         val allowed = setOf("label", "on_tap", "icon", "dismiss", "input")
         for (k in a.keys) if (k !in allowed)
@@ -649,6 +656,15 @@ object SpecValidator {
         // would validate but throw at tap time.
         if ("builtin" in onTap)
             throw ContentInvalid("$path.on_tap", "notification action must be a remote action, not a builtin")
+        if ("capture_fields" in onTap)
+            throw ContentInvalid("$path.on_tap", "must not capture_fields")
+        onTap.objOrNull("args")?.let { args ->
+            for (member in injectedMembers) if (member in args)
+                throw ContentInvalid(
+                    "$path.on_tap.args.$member",
+                    "conflicts with injected value",
+                )
+        }
         // LD-19: identifiers carry the SPEC 4.4/4.5 128-octet bound, not
         // just the grammar — this is the node-id check applied to the two
         // sites that missed it (icon here, input.key below).
@@ -682,11 +698,18 @@ object SpecValidator {
         val isRemote = "action" in onTap && "builtin" !in onTap
         if (requiresRemote && !isRemote)
             throw ContentInvalid("$path.on_tap", "must be a remote action for input/dismiss")
-        if (hasInput && "capture_fields" in onTap)
-            throw ContentInvalid("$path.on_tap", "an inline reply must not capture_fields")
-        if ("open_surface" in onTap)
+        if ("open_surface" in onTap && !allowOpenSurface)
             throw ContentInvalid("$path.on_tap.open_surface",
                 "action.open_surface is not valid in a notification context")
+        if ("open_surface" in onTap && allowOpenSurface) {
+            val target = onTap.stringOrNull("open_surface")
+            if (target == null || !target.startsWith("app:") ||
+                !APP_SURFACE_ID.matches(target))
+                throw ContentInvalid(
+                    "$path.on_tap.open_surface",
+                    "must be an app Surface ID",
+                )
+        }
         // SPEC 14.1/14.2: validate the descriptor itself with the SAME rules
         // the surface path uses — exactly-one action/builtin, a dotted action
         // name, a known offline policy, ttl_s only for queue/wake and in
@@ -733,6 +756,21 @@ object SpecValidator {
                 throw ContentInvalid("$path.on_tap.builtin", "unknown builtin $name")
         }
     }
+
+    /** Validate a Section 18.6 reminder action. Reminder occurrences inject
+     * their durable identity and may carry the negotiated app-surface launch
+     * adjunct, but otherwise use the exact Section 18.5 action shape. */
+    fun validateReminderAction(
+        action: JsonObject,
+        path: String,
+        offlineWakeGranted: Boolean,
+    ) = validateNotificationAction(
+        action,
+        path,
+        offlineWakeGranted,
+        injectedMembers = setOf("owner", "reminder_id"),
+        allowOpenSurface = true,
+    )
 
     private fun containsEditor(value: JsonElement?): Boolean = when (value) {
         is JsonObject -> value["t"]?.asStringOrNull() == "editor" ||

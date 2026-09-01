@@ -270,6 +270,52 @@ fun routeReminderTap(
 }
 
 /**
+ * SPEC 18.6: route one ordered reminder notification action from the durable
+ * reminder record. The platform PendingIntent carries only owner/id/tuple and
+ * an array index; application verbs and arguments are recovered here after a
+ * cold start, then owner/reminder_id are injected exactly as for a body tap.
+ * Returns false for a stale, removed, or malformed platform occurrence.
+ */
+fun routeReminderAction(
+    reminders: ReminderStore,
+    queue: DurableQueue,
+    maxEventBytes: Long,
+    owner: String,
+    reminderId: String,
+    actionIndex: Int,
+    expectedAtMs: Long? = null,
+    replyText: String? = null,
+    live: LiveSession?,
+    maxFieldBytes: Long = Long.MAX_VALUE,
+    callback: ((String?, JsonObject?) -> Unit)? = null,
+): Boolean {
+    if (actionIndex < 0) return false
+    val reminder = reminders.reminder(owner, reminderId) ?: return false
+    if (expectedAtMs != null &&
+        integralLongOrNull(reminder["at_ms"]) != expectedAtMs) return false
+    val action = reminder.arrOrNull("actions")?.getOrNull(actionIndex) as? JsonObject
+        ?: return false
+    val onTap = action.objOrNull("on_tap") ?: return false
+    val args = (onTap.objOrNull("args") ?: JsonObject(emptyMap()))
+        .with("owner", JsonPrimitive(owner))
+        .with("reminder_id", JsonPrimitive(reminderId))
+    val routed = onTap.with("args", args)
+    val input = action.objOrNull("input")
+    val replyKey = input?.stringOr("key", "reply")
+    routeNotificationAction(
+        queue,
+        maxEventBytes,
+        routed,
+        replyKey,
+        if (input == null) null else replyText,
+        live,
+        maxFieldBytes,
+        callback,
+    )
+    return true
+}
+
+/**
  * SPEC 18.5: route a notification action tap into the Section 14 pipeline. The
  * remote on_tap descriptor rides the tap intent (so a cold receiver needs no
  * store), its authored args are preserved, and an inline reply's typed text is

@@ -1803,7 +1803,9 @@ class CompanionEngine(
     // to 127 more) — the length bound applies to reminder owner/id, cap names,
     // and pie menu_id alike.
     private val identifier = Regex("[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
-    private val reminderMembers = setOf("id", "title", "body", "at_ms", "on_tap")
+    private val reminderMembers = setOf(
+        "id", "title", "body", "at_ms", "on_tap", "actions",
+    )
 
     private fun handleRemindersSet(id: JsonElement, params: JsonObject) {
         if ("reminders.owner" !in granted)
@@ -1826,6 +1828,7 @@ class CompanionEngine(
                     r,
                     seen,
                     offlineWakeGranted = "offline.wake" in granted,
+                    reminderActionsGranted = "reminders.actions" in granted,
                 )
             } catch (e: ContentInvalid) {
                 return respondError(id, 1201, "Invalid content", "content-invalid",
@@ -1859,6 +1862,7 @@ class CompanionEngine(
         r: JsonObject,
         seen: MutableSet<String>,
         offlineWakeGranted: Boolean,
+        reminderActionsGranted: Boolean,
     ) {
         for (k in r.keys) if (k !in reminderMembers)
             throw ContentInvalid(k, "unknown reminder member")
@@ -1890,12 +1894,41 @@ class CompanionEngine(
                 if ("owner" in args || "reminder_id" in args)
                     throw ContentInvalid("on_tap.args", "owner/reminder_id are injected")
             }
+            if ("open_surface" in onTap) {
+                val target = onTap.stringOrNull("open_surface")
+                if (!reminderActionsGranted)
+                    throw ContentInvalid(
+                        "on_tap.open_surface",
+                        "requires reminders.actions grant",
+                    )
+                if (target == null || !target.startsWith("app:"))
+                    throw ContentInvalid(
+                        "on_tap.open_surface",
+                        "must be an app Surface ID",
+                    )
+            }
             SpecValidator.validateContextlessRemoteAction(
                 onTap,
                 "on_tap",
                 injectedMembers = setOf("owner", "reminder_id"),
                 offlineWakeGranted = offlineWakeGranted,
+                allowOpenSurface = reminderActionsGranted,
             )
+        }
+        if ("actions" in r) {
+            if (!reminderActionsGranted)
+                throw ContentInvalid("actions", "requires reminders.actions grant")
+            val actions = r.arrOrNull("actions")
+                ?: throw ContentInvalid("actions", "must be an array")
+            for (index in actions.indices) {
+                val action = actions[index] as? JsonObject
+                    ?: throw ContentInvalid("actions[$index]", "must be an object")
+                SpecValidator.validateReminderAction(
+                    action,
+                    "actions[$index]",
+                    offlineWakeGranted,
+                )
+            }
         }
     }
 
