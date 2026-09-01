@@ -193,4 +193,80 @@ class ExtensionSchemaTest {
             )
         }
     }
+
+    @Test
+    fun longLivedStoreReadsTheCurrentAppAdmissionConfiguration() {
+        val dynamicType = "example.dynamic"
+        val dynamicRow = NodeRow(
+            required = setOf("children"),
+            optional = setOf("flag"),
+        )
+        val dynamicTyped = ExtensionNodeSchema(
+            required = mapOf(
+                "children" to ExtensionValueSchema.NodeArrayValue(0, 4),
+            ),
+            optional = mapOf("flag" to ExtensionValueSchema.BooleanValue),
+        )
+        var enabled = false
+        var semanticCalls = 0
+        val disabledVocabulary = NodeVocabulary(
+            schema = NODE_SCHEMA + (dynamicType to dynamicRow),
+        )
+        val enabledVocabulary = NodeVocabulary(
+            schema = NODE_SCHEMA + (dynamicType to dynamicRow),
+            extensions = mapOf("example.dynamic" to setOf(dynamicType)),
+            extensionSchemas = mapOf(dynamicType to dynamicTyped),
+            extensionSemanticValidators = mapOf(
+                "example.dynamic" to ExtensionSemanticValidator { _, _ ->
+                    semanticCalls++
+                },
+            ),
+        )
+        val store = SurfaceStore(
+            maxSurfaces = 4,
+            maxSurfaceIds = 8,
+            appAdmissionProvider = {
+                AppSurfaceAdmission(
+                    nodeTypes = NODE_SCHEMA.keys + if (enabled) {
+                        setOf(dynamicType)
+                    } else {
+                        emptySet()
+                    },
+                    nodeVocabulary = if (enabled) {
+                        enabledVocabulary
+                    } else {
+                        disabledVocabulary
+                    },
+                )
+            },
+        )
+        val malformed = Json.parseToJsonElement(
+            """{"t":"$dynamicType","children":[{"t":"text","text":"fallback"}],"flag":"true"}""",
+        ) as JsonObject
+
+        // Disabled: the known row degrades through children and neither the
+        // typed schema nor semantic validator applies.
+        assertEquals(
+            "applied",
+            store.update("app:dynamic", 1, malformed, null, null, null).status,
+        )
+        assertEquals(0, semanticCalls)
+
+        // The same store immediately adopts the enabled typed/semantic gate.
+        enabled = true
+        val failure = assertThrows(ContentInvalid::class.java) {
+            store.update("app:dynamic", 2, malformed, null, null, null)
+        }
+        assertEquals("spec.flag", failure.path)
+        assertEquals(0, semanticCalls)
+
+        val valid = Json.parseToJsonElement(
+            """{"t":"$dynamicType","children":[{"t":"text","text":"active"}],"flag":true}""",
+        ) as JsonObject
+        assertEquals(
+            "applied",
+            store.update("app:dynamic", 2, valid, null, null, null).status,
+        )
+        assertEquals(1, semanticCalls)
+    }
 }

@@ -30,6 +30,20 @@ class SurfacePersistenceFailed(cause: Exception) : Exception(cause)
  * absent member (see [PersistedDraft]). */
 data class InputDisplay(val epoch: Long, val value: JsonElement?)
 
+/**
+ * Current app-target admission configuration for a long-lived surface store.
+ *
+ * Most hosts use the constructor's static values. A receiver-local feature
+ * toggle can instead supply this snapshot per admission without replacing
+ * persisted surface state or teaching the wire layer any feature name.
+ */
+data class AppSurfaceAdmission(
+    val nodeTypes: Set<String>? = null,
+    val builtins: Set<String>? = null,
+    val features: Set<String>? = null,
+    val nodeVocabulary: NodeVocabulary = EBP_NODE_VOCABULARY,
+)
+
 class SurfaceStore(
     private val maxSurfaces: Long,
     private val maxSurfaceIds: Long,
@@ -74,7 +88,17 @@ class SurfaceStore(
     /** Whether restored descriptors may retain a previously accepted `wake`
      * policy. Session updates still pass the actual negotiated grant. */
     private val offlineWakeConfigured: Boolean = false,
+    /** Optional current app-target configuration for receiver-local toggles. */
+    private val appAdmissionProvider: (() -> AppSurfaceAdmission)? = null,
 ) {
+
+    private fun appAdmission(): AppSurfaceAdmission =
+        appAdmissionProvider?.invoke() ?: AppSurfaceAdmission(
+            nodeTypes = appNodeTypes,
+            builtins = appBuiltins,
+            features = appFeatures,
+            nodeVocabulary = nodeVocabulary,
+        )
 
     private class Record(
         var revision: Long,
@@ -195,14 +219,15 @@ class SurfaceStore(
                         }
                         emptyMap()
                     } else {
+                        val admission = appAdmission()
                         SpecValidator.validateSurfaceSpec(r.spec,
                             maxCaptureFields = maxCaptureFields,
                             maxChartPoints = maxChartPoints, maxCanvasOps = maxCanvasOps,
                             maxRichSpans = maxRichSpans, maxTableCells = maxTableCells,
-                            advertisedTypes = appNodeTypes,
-                            advertisedBuiltins = appBuiltins,
-                            advertisedFeatures = appFeatures,
-                            nodeVocabulary = nodeVocabulary,
+                            advertisedTypes = admission.nodeTypes,
+                            advertisedBuiltins = admission.builtins,
+                            advertisedFeatures = admission.features,
+                            nodeVocabulary = admission.nodeVocabulary,
                             offlineWakeGranted = offlineWakeConfigured,
                         )
                             .also {
@@ -215,10 +240,10 @@ class SurfaceStore(
                                         maxCanvasOps,
                                         maxRichSpans,
                                         maxTableCells,
-                                        appNodeTypes,
-                                        appBuiltins,
-                                        appFeatures,
-                                        nodeVocabulary,
+                                        admission.nodeTypes,
+                                        admission.builtins,
+                                        admission.features,
+                                        admission.nodeVocabulary,
                                         offlineWakeGranted = offlineWakeConfigured,
                                     )
                                 }
@@ -541,13 +566,15 @@ class SurfaceStore(
             reset = emptySet()
             isMultiView = false
         } else {
+            val admission = appAdmission()
             statefuls = SpecValidator.validateSurfaceSpec(
                 spec, maxCaptureFields = maxCaptureFields,
                 maxChartPoints = maxChartPoints, maxCanvasOps = maxCanvasOps,
                 maxRichSpans = maxRichSpans, maxTableCells = maxTableCells,
-                advertisedTypes = appNodeTypes, advertisedBuiltins = appBuiltins,
-                advertisedFeatures = appFeatures,
-                nodeVocabulary = nodeVocabulary,
+                advertisedTypes = admission.nodeTypes,
+                advertisedBuiltins = admission.builtins,
+                advertisedFeatures = admission.features,
+                nodeVocabulary = admission.nodeVocabulary,
                 offlineWakeGranted = offlineWakeGranted)
             reset = resetIds?.let { SpecValidator.validateResetIds(it, statefuls) }
                 ?: emptySet()
@@ -558,8 +585,8 @@ class SurfaceStore(
             // rather than be held to its per-type schema.
             staleSpec?.let { SpecValidator.validateStaleSpec(it, "views" in spec,
                 maxCaptureFields, maxChartPoints, maxCanvasOps,
-                maxRichSpans, maxTableCells, appNodeTypes, appBuiltins,
-                appFeatures, nodeVocabulary,
+                maxRichSpans, maxTableCells, admission.nodeTypes, admission.builtins,
+                admission.features, admission.nodeVocabulary,
                 offlineWakeGranted = offlineWakeGranted) }
             isMultiView = "views" in spec
             if (currentView != null) {
