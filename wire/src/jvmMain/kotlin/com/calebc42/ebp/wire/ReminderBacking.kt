@@ -29,6 +29,18 @@ interface ReminderBacking {
     fun replace(state: ReminderState)
 }
 
+/**
+ * Database hosts can atomically record the fired receipt and enqueue the
+ * idempotent platform presentation. File and memory hosts keep the original
+ * receipt-before-presentation contract through [ReminderBacking].
+ */
+interface AtomicReminderPresentationBacking : ReminderBacking {
+    fun replaceWithPresentation(
+        state: ReminderState,
+        presentationEffect: DurablePlatformEffect,
+    )
+}
+
 class MemoryReminderBacking : ReminderBacking {
     private var state = ReminderState(emptyMap(), emptySet())
     override fun load(): ReminderState = state

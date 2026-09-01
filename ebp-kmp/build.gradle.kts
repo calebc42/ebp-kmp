@@ -10,8 +10,8 @@ kotlin {
 
     android {
         namespace = "com.calebc42.ebp.kmp"
-        compileSdk = 36
-        minSdk = 36
+        compileSdk = 37
+        minSdk = 34
         withHostTestBuilder {}
     }
 
@@ -19,6 +19,7 @@ kotlin {
         commonMain.dependencies {
             // JsonElement is part of the portable EBP API.
             api(libs.kotlinx.serialization.json)
+            implementation(libs.kotlinx.coroutines.core)
         }
         jvmTest.dependencies {
             implementation(libs.junit)

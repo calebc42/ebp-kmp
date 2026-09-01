@@ -38,7 +38,9 @@ tasks.named<Test>("jvmTest") {
     useJUnit()
     // A standalone checkout uses sibling ../ebp. The specification owns the
     // implementation-neutral corpus generator as well as normative fixtures.
-    systemProperty("ebp.dir", rootDir.resolve("../ebp").canonicalPath)
+    // Resolve from this source-owned module, not the consuming composition
+    // root: Jetpacs includes :wire from a neighboring checkout.
+    systemProperty("ebp.dir", projectDir.resolve("../../ebp").canonicalPath)
 }
 
 // Keeps the documented gate command (`./gradlew :wire:test`) working.

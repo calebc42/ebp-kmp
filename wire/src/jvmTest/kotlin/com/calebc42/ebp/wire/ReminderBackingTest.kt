@@ -72,6 +72,52 @@ class ReminderBackingTest {
         }
     }
 
+    private class AtomicPresentationBacking : AtomicReminderPresentationBacking {
+        var state = ReminderState(emptyMap(), emptySet())
+        var effect: DurablePlatformEffect? = null
+        override fun load() = state
+        override fun replace(state: ReminderState) { this.state = state }
+        override fun replaceWithPresentation(
+            state: ReminderState,
+            presentationEffect: DurablePlatformEffect,
+        ) {
+            this.state = state
+            effect = presentationEffect
+        }
+    }
+
+    @Test
+    fun receiptAndPresentationEffectUseAtomicBackingAndRejectAStaleAlarmTuple() {
+        val backing = AtomicPresentationBacking()
+        val store = ReminderStore(backing)
+        store.replace("owner", listOf(reminder("r1", 1_000)))
+        val effect = DurablePlatformEffect(
+            effectId = "effect-r1",
+            kind = "notification.reminder",
+            payload = buildJsonObject { put("title", "Reminder") },
+            dedupeKey = "reminder:r1:1000",
+            createdAtMs = 1_000,
+        )
+
+        assertFalse(store.markFired(
+            owner = "owner",
+            id = "r1",
+            presentationEffect = effect,
+            expectedAtMs = 999,
+        ))
+        assertTrue(backing.state.fired.isEmpty())
+        assertEquals(null, backing.effect)
+
+        assertTrue(store.markFired(
+            owner = "owner",
+            id = "r1",
+            presentationEffect = effect,
+            expectedAtMs = 1_000,
+        ))
+        assertEquals(effect, backing.effect)
+        assertEquals(setOf("owner r1 1000"), backing.state.fired)
+    }
+
     @Test
     fun storageFailureRestoresPriorSetAndThrows() {
         val backing = FlakyBacking()

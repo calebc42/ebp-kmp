@@ -54,6 +54,11 @@ interface SurfaceBacking {
     fun replaceDrafts(drafts: List<PersistedDraft>)
 }
 
+/** A backend that can commit surface histories and reconciled drafts together. */
+interface AtomicSurfaceBacking : SurfaceBacking {
+    fun replaceState(records: List<PersistedRecord>, drafts: List<PersistedDraft>)
+}
+
 class MemorySurfaceBacking : SurfaceBacking {
     private var records = emptyList<PersistedRecord>()
     private var drafts = emptyList<PersistedDraft>()

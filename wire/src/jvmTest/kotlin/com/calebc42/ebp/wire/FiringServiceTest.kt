@@ -182,6 +182,50 @@ class FiringServiceTest {
         }
     }
 
+    private class RecordingOccurrenceTransaction : TriggerOccurrenceTransaction {
+        val calls = mutableListOf<String>()
+        override fun begin() { calls += "begin" }
+        override fun complete() { calls += "complete" }
+        override fun abort() { calls += "abort" }
+    }
+
+    @Test
+    fun hostOccurrenceTransactionCompletesOnSuccessAndAbortsOnRecordFailure() {
+        val successState = hashMapOf<String, JsonObject>("battery.level" to battery(50))
+        val successTx = RecordingOccurrenceTransaction()
+        val successStore = TriggerStore()
+        val success = TriggerFiringService(
+            successStore,
+            DurableQueue(MemoryQueueStore(), 256, 8_388_608),
+            262_144,
+            occurrenceTransaction = successTx,
+        ).also { it.stateProvider = { type -> successState[type] } }
+        success.replaceSet("id", entries(trig("bat") {
+            put("policy", "queue"); put("ttl_s", 86_400)
+        }))
+        successState["battery.level"] = battery(19)
+        success.observeSample("battery.level", battery(19))
+        assertEquals(listOf("begin", "complete"), successTx.calls)
+
+        val failingBacking = ThrowOnReplace()
+        val failingStore = TriggerStore(failingBacking)
+        val failureState = hashMapOf<String, JsonObject>("battery.level" to battery(50))
+        val failureTx = RecordingOccurrenceTransaction()
+        val failing = TriggerFiringService(
+            failingStore,
+            DurableQueue(MemoryQueueStore(), 256, 8_388_608),
+            262_144,
+            occurrenceTransaction = failureTx,
+        ).also { it.stateProvider = { type -> failureState[type] } }
+        failing.replaceSet("id", entries(trig("bat") {
+            put("policy", "queue"); put("ttl_s", 86_400)
+        }))
+        failingBacking.throwNow = true
+        failureState["battery.level"] = battery(19)
+        failing.observeSample("battery.level", battery(19))
+        assertEquals(listOf("begin", "abort"), failureTx.calls)
+    }
+
     @Test
     fun transactionBFailureRollsBackTheQueuedEvent() {
         // A committed (queue.admit), then B (persistRecords) fails: the event

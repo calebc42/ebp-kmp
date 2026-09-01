@@ -200,6 +200,11 @@ class SurfaceStore(
         }
         var draftsReplaced = false
         try {
+            if (nextDrafts != null && backing is AtomicSurfaceBacking) {
+                backing.replaceState(persistedRecords(), nextDrafts)
+                recordsDirty = false
+                return
+            }
             if (nextDrafts != null) {
                 backing.replaceDrafts(nextDrafts)
                 draftsReplaced = true

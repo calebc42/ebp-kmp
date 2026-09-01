@@ -21,6 +21,11 @@ class MemoryEbpDurableStore : EbpDurableStore {
         val drafts: LinkedHashMap<Pair<String, String>, DurableDraft> = LinkedHashMap(),
         val outbox: LinkedHashMap<Long, DurableOutboxEvent> = LinkedHashMap(),
         val issuedEventIds: LinkedHashMap<EventId, IssuedEventId> = LinkedHashMap(),
+        val reminders: LinkedHashMap<Pair<String, String>, DurableReminder> = LinkedHashMap(),
+        val reminderReceipts: LinkedHashMap<Triple<String, String, Long>, DurableReminderReceipt> = LinkedHashMap(),
+        val triggers: LinkedHashMap<Pair<String, String>, DurableTriggerRegistration> = LinkedHashMap(),
+        var theme: DurableTheme? = null,
+        val platformEffects: LinkedHashMap<String, DurablePlatformEffect> = LinkedHashMap(),
     ) {
         fun copyForWrite(): Partition = Partition(
             pairing = pairing,
@@ -30,6 +35,11 @@ class MemoryEbpDurableStore : EbpDurableStore {
             drafts = LinkedHashMap(drafts),
             outbox = LinkedHashMap(outbox),
             issuedEventIds = LinkedHashMap(issuedEventIds),
+            reminders = LinkedHashMap(reminders),
+            reminderReceipts = LinkedHashMap(reminderReceipts),
+            triggers = LinkedHashMap(triggers),
+            theme = theme,
+            platformEffects = LinkedHashMap(platformEffects),
         )
     }
 
@@ -73,6 +83,21 @@ class MemoryEbpDurableStore : EbpDurableStore {
             issuedEventIds = state.issuedEventIds.values.sortedWith(
                 compareBy<IssuedEventId> { it.reusableAfterMs }
                     .thenBy { it.eventId.value },
+            ),
+            reminders = state.reminders.values.sortedWith(
+                compareBy<DurableReminder> { it.owner }.thenBy { it.authoredOrdinal },
+            ),
+            reminderReceipts = state.reminderReceipts.values.sortedWith(
+                compareBy<DurableReminderReceipt> { it.owner }
+                    .thenBy { it.reminderId }.thenBy { it.atMs },
+            ),
+            triggers = state.triggers.values.sortedWith(
+                compareBy<DurableTriggerRegistration> { it.identity }
+                    .thenBy { it.authoredOrdinal },
+            ),
+            theme = state.theme,
+            platformEffects = state.platformEffects.values.sortedWith(
+                compareBy<DurablePlatformEffect> { it.createdAtMs }.thenBy { it.effectId },
             ),
         )
     }
@@ -182,6 +207,11 @@ class MemoryEbpDurableStore : EbpDurableStore {
             state.drafts.clear()
             state.outbox.clear()
             state.issuedEventIds.clear()
+            state.reminders.clear()
+            state.reminderReceipts.clear()
+            state.triggers.clear()
+            state.theme = null
+            state.platformEffects.clear()
             state.runtime = PairingRuntime()
             return fenced
         }
@@ -399,6 +429,116 @@ class MemoryEbpDurableStore : EbpDurableStore {
             checkOpen()
             checkPartition()
             state.issuedEventIds.clear()
+        }
+
+        override suspend fun reminders(owner: String?): List<DurableReminder> {
+            checkOpen()
+            return state.reminders.values.filter { owner == null || it.owner == owner }
+                .sortedWith(compareBy<DurableReminder> { it.owner }.thenBy { it.authoredOrdinal })
+        }
+
+        override suspend fun putReminder(reminder: DurableReminder) {
+            checkOpen(); checkPartition()
+            state.reminders[reminder.owner to reminder.reminderId] = reminder
+        }
+
+        override suspend fun deleteReminder(owner: String, reminderId: String) {
+            checkOpen(); checkPartition()
+            state.reminders.remove(owner to reminderId)
+            state.reminderReceipts.keys.removeAll { it.first == owner && it.second == reminderId }
+        }
+
+        override suspend fun deleteReminders(owner: String?) {
+            checkOpen(); checkPartition()
+            state.reminders.keys.removeAll { owner == null || it.first == owner }
+            state.reminderReceipts.keys.removeAll { owner == null || it.first == owner }
+        }
+
+        override suspend fun reminderReceipts(owner: String?): List<DurableReminderReceipt> {
+            checkOpen()
+            return state.reminderReceipts.values.filter { owner == null || it.owner == owner }
+                .sortedWith(compareBy<DurableReminderReceipt> { it.owner }
+                    .thenBy { it.reminderId }.thenBy { it.atMs })
+        }
+
+        override suspend fun putReminderReceipt(receipt: DurableReminderReceipt) {
+            checkOpen(); checkPartition()
+            val reminder = state.reminders[receipt.owner to receipt.reminderId]
+            require(reminder?.atMs == receipt.atMs) { "receipt requires its current reminder tuple" }
+            val key = Triple(receipt.owner, receipt.reminderId, receipt.atMs)
+            require(key !in state.reminderReceipts) { "reminder receipt already exists" }
+            state.reminderReceipts[key] = receipt
+        }
+
+        override suspend fun deleteReminderReceipt(owner: String, reminderId: String, atMs: Long) {
+            checkOpen(); checkPartition()
+            state.reminderReceipts.remove(Triple(owner, reminderId, atMs))
+        }
+
+        override suspend fun deleteReminderReceipts(owner: String?) {
+            checkOpen(); checkPartition()
+            state.reminderReceipts.keys.removeAll { owner == null || it.first == owner }
+        }
+
+        override suspend fun triggers(identity: String?): List<DurableTriggerRegistration> {
+            checkOpen()
+            return state.triggers.values.filter { identity == null || it.identity == identity }
+                .sortedWith(compareBy<DurableTriggerRegistration> { it.identity }
+                    .thenBy { it.authoredOrdinal })
+        }
+
+        override suspend fun putTrigger(trigger: DurableTriggerRegistration) {
+            checkOpen(); checkPartition()
+            state.triggers[trigger.identity to trigger.triggerId] = trigger
+        }
+
+        override suspend fun deleteTrigger(identity: String, triggerId: String) {
+            checkOpen(); checkPartition()
+            state.triggers.remove(identity to triggerId)
+        }
+
+        override suspend fun deleteTriggers(identity: String?) {
+            checkOpen(); checkPartition()
+            state.triggers.keys.removeAll { identity == null || it.first == identity }
+        }
+
+        override suspend fun theme(): DurableTheme? { checkOpen(); return state.theme }
+
+        override suspend fun putTheme(theme: DurableTheme) {
+            checkOpen(); checkPartition(); state.theme = theme
+        }
+
+        override suspend fun deleteTheme() { checkOpen(); checkPartition(); state.theme = null }
+
+        override suspend fun platformEffects(
+            states: Set<DurablePlatformEffectState>,
+            limit: Int,
+        ): List<DurablePlatformEffect> {
+            checkOpen(); require(limit > 0)
+            return state.platformEffects.values.filter { it.state in states }
+                .sortedWith(compareBy<DurablePlatformEffect> { it.createdAtMs }.thenBy { it.effectId })
+                .take(limit)
+        }
+
+        override suspend fun platformEffect(effectId: String): DurablePlatformEffect? {
+            checkOpen(); return state.platformEffects[effectId]
+        }
+
+        override suspend fun putPlatformEffect(effect: DurablePlatformEffect) {
+            checkOpen(); checkPartition()
+            val duplicate = state.platformEffects.values.firstOrNull {
+                it.dedupeKey == effect.dedupeKey && it.effectId != effect.effectId
+            }
+            require(duplicate == null) { "platform effect dedupe key already exists" }
+            state.platformEffects[effect.effectId] = effect
+        }
+
+        override suspend fun deletePlatformEffect(effectId: String) {
+            checkOpen(); checkPartition(); state.platformEffects.remove(effectId)
+        }
+
+        override suspend fun deleteAllPlatformEffects() {
+            checkOpen(); checkPartition(); state.platformEffects.clear()
         }
     }
 }

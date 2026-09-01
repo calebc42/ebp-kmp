@@ -204,6 +204,100 @@ data class IssuedEventId(
     }
 }
 
+/** One normalized reminder retained in author order for an owner. */
+data class DurableReminder(
+    val owner: String,
+    val reminderId: String,
+    val atMs: Long,
+    val authoredOrdinal: Long,
+    val payload: JsonObject,
+) {
+    init {
+        require(owner.isNotBlank())
+        require(reminderId.isNotBlank())
+        requireEbpTimestamp(atMs, "atMs")
+        require(authoredOrdinal >= 0)
+    }
+}
+
+/** At-most-once presentation receipt for one reminder tuple. */
+data class DurableReminderReceipt(
+    val owner: String,
+    val reminderId: String,
+    val atMs: Long,
+    val firedAtMs: Long,
+) {
+    init {
+        require(owner.isNotBlank())
+        require(reminderId.isNotBlank())
+        requireEbpTimestamp(atMs, "atMs")
+        requireEbpTimestamp(firedAtMs, "firedAtMs")
+    }
+}
+
+/** Normalized trigger plus every runtime field that survives an equal replace. */
+data class DurableTriggerRegistration(
+    val identity: String,
+    val triggerId: String,
+    val authoredOrdinal: Long,
+    val entry: JsonObject,
+    val canonicalIdentity: String,
+    val throttleFloorMs: Long? = null,
+    val oneShotCompleted: Boolean = false,
+    val scheduleAnchorMs: Long? = null,
+    val lastFireFloorMs: Long? = null,
+    val bootGeneration: String? = null,
+) {
+    init {
+        require(identity.isNotBlank())
+        require(triggerId.isNotBlank())
+        require(authoredOrdinal >= 0)
+        require(canonicalIdentity.isNotBlank())
+        throttleFloorMs?.let { requireEbpTimestamp(it, "throttleFloorMs") }
+        scheduleAnchorMs?.let { requireEbpTimestamp(it, "scheduleAnchorMs") }
+        lastFireFloorMs?.let { requireEbpTimestamp(it, "lastFireFloorMs") }
+        require(bootGeneration == null || bootGeneration.isNotBlank())
+    }
+}
+
+/** Complete latest accepted theme. Null theme is represented by row absence. */
+data class DurableTheme(
+    val payload: JsonObject,
+    val acceptedAtMs: Long,
+) {
+    init { requireEbpTimestamp(acceptedAtMs, "acceptedAtMs") }
+}
+
+enum class DurablePlatformEffectState { PENDING, CLAIMED, COMPLETED }
+
+/**
+ * Opaque, idempotent work for a host adapter. EBP owns ordering and durable
+ * completion; the host alone interprets [kind] and [payload].
+ */
+data class DurablePlatformEffect(
+    val effectId: String,
+    val kind: String,
+    val payload: JsonObject,
+    val dedupeKey: String,
+    val state: DurablePlatformEffectState = DurablePlatformEffectState.PENDING,
+    val createdAtMs: Long,
+    val attemptCount: Long = 0,
+    val claimedAtMs: Long? = null,
+    val completedAtMs: Long? = null,
+) {
+    init {
+        require(effectId.isNotBlank())
+        require(kind.isNotBlank())
+        require(dedupeKey.isNotBlank())
+        requireEbpTimestamp(createdAtMs, "createdAtMs")
+        require(attemptCount >= 0)
+        require(claimedAtMs == null || claimedAtMs >= createdAtMs)
+        require(completedAtMs == null || completedAtMs >= createdAtMs)
+        require(state != DurablePlatformEffectState.CLAIMED || claimedAtMs != null)
+        require(state != DurablePlatformEffectState.COMPLETED || completedAtMs != null)
+    }
+}
+
 /** Immutable restore result, ordered exactly as protocol reducers consume it. */
 data class DurableSnapshot(
     val pairing: DurablePairing?,
@@ -212,6 +306,11 @@ data class DurableSnapshot(
     val drafts: List<DurableDraft>,
     val outbox: List<DurableOutboxEvent>,
     val issuedEventIds: List<IssuedEventId>,
+    val reminders: List<DurableReminder> = emptyList(),
+    val reminderReceipts: List<DurableReminderReceipt> = emptyList(),
+    val triggers: List<DurableTriggerRegistration> = emptyList(),
+    val theme: DurableTheme? = null,
+    val platformEffects: List<DurablePlatformEffect> = emptyList(),
 ) {
     companion object {
         fun empty(): DurableSnapshot = DurableSnapshot(
@@ -221,6 +320,11 @@ data class DurableSnapshot(
             drafts = emptyList(),
             outbox = emptyList(),
             issuedEventIds = emptyList(),
+            reminders = emptyList(),
+            reminderReceipts = emptyList(),
+            triggers = emptyList(),
+            theme = null,
+            platformEffects = emptyList(),
         )
     }
 }
@@ -289,6 +393,34 @@ interface EbpWriteTransaction {
         limit: Int,
     ): List<IssuedEventId>
     suspend fun deleteAllIssuedEventIds()
+
+    suspend fun reminders(owner: String? = null): List<DurableReminder>
+    suspend fun putReminder(reminder: DurableReminder)
+    suspend fun deleteReminder(owner: String, reminderId: String)
+    suspend fun deleteReminders(owner: String? = null)
+
+    suspend fun reminderReceipts(owner: String? = null): List<DurableReminderReceipt>
+    suspend fun putReminderReceipt(receipt: DurableReminderReceipt)
+    suspend fun deleteReminderReceipt(owner: String, reminderId: String, atMs: Long)
+    suspend fun deleteReminderReceipts(owner: String? = null)
+
+    suspend fun triggers(identity: String? = null): List<DurableTriggerRegistration>
+    suspend fun putTrigger(trigger: DurableTriggerRegistration)
+    suspend fun deleteTrigger(identity: String, triggerId: String)
+    suspend fun deleteTriggers(identity: String? = null)
+
+    suspend fun theme(): DurableTheme?
+    suspend fun putTheme(theme: DurableTheme)
+    suspend fun deleteTheme()
+
+    suspend fun platformEffects(
+        states: Set<DurablePlatformEffectState> = setOf(DurablePlatformEffectState.PENDING),
+        limit: Int = 64,
+    ): List<DurablePlatformEffect>
+    suspend fun platformEffect(effectId: String): DurablePlatformEffect?
+    suspend fun putPlatformEffect(effect: DurablePlatformEffect)
+    suspend fun deletePlatformEffect(effectId: String)
+    suspend fun deleteAllPlatformEffects()
 }
 
 /**

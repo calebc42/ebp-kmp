@@ -115,12 +115,25 @@ class ReminderStore(private val backing: ReminderBacking = MemoryReminderBacking
      * showing) and leaves the tuple eligible for a later retry.
      */
     @Synchronized
-    fun markFired(owner: String, id: String): Boolean {
+    fun markFired(
+        owner: String,
+        id: String,
+        presentationEffect: DurablePlatformEffect? = null,
+        expectedAtMs: Long? = null,
+    ): Boolean {
         val r = owners[owner]?.get(id) ?: return false
-        val k = key(owner, id, r.atMs())
+        val atMs = r.atMs()
+        if (expectedAtMs != null && expectedAtMs != atMs) return false
+        val k = key(owner, id, atMs)
         if (!fired.add(k)) return false
         return try {
-            backing.replace(snapshot()); true
+            val next = snapshot()
+            if (presentationEffect != null && backing is AtomicReminderPresentationBacking) {
+                backing.replaceWithPresentation(next, presentationEffect)
+            } else {
+                backing.replace(next)
+            }
+            true
         } catch (e: Exception) {
             fired.remove(k); false
         }

@@ -32,6 +32,20 @@ fun jsonStringSet(o: JsonObject, key: String): Set<String> {
  * when the device wall clock reaches `dueMs`. */
 data class TimeAlarm(val identity: String, val triggerId: String, val dueMs: Long)
 
+/**
+ * Optional host transaction boundary for a durable trigger occurrence.
+ *
+ * The portable file-backed runtime retains its recovery protocol when this is
+ * absent. A host with a multi-table database can provide it so the staged
+ * queue projection and the trigger runtime projection commit together.
+ * Implementations are actor-confined and [complete]/[abort] must not throw.
+ */
+interface TriggerOccurrenceTransaction {
+    fun begin()
+    fun complete()
+    fun abort()
+}
+
 class TriggerFiringService(
     val store: TriggerStore,
     private val queue: DurableQueue,
@@ -41,6 +55,7 @@ class TriggerFiringService(
     private val zone: () -> ZoneId = { ZoneId.systemDefault() },
     /** SPEC 21.5: current device boot generation (Settings.Global.BOOT_COUNT). */
     private val bootGeneration: () -> String? = { null },
+    private val occurrenceTransaction: TriggerOccurrenceTransaction? = null,
 ) {
     /** SPEC 21.3/21.7: current sample for a state type (gate/edge/window). */
     @Volatile var stateProvider: (String) -> JsonObject? = { null }
@@ -97,9 +112,10 @@ class TriggerFiringService(
 
     /** SPEC 21.5 (time): a host alarm for exactly this time.* registration
      * elapsed — fire only it (each time entry has its own due time). The fire
-     * data carries `precision` (SPEC 21.5 fire-data): the host arms
-     * setExactAndAllowWhileIdle, whose Doze / allow-while-idle quota MAY defer
-     * it, so the honest never-over-claimed value is `inexact`. */
+     * data carries `precision` (SPEC 21.5 fire-data): a host may use exact
+     * access when granted or an inexact allow-while-idle fallback, and either
+     * path may be deferred, so the honest never-over-claimed value is
+     * `inexact`. */
     fun fireScheduled(identity: String, triggerId: String) =
         runLocked { runtime.fireScheduled(identity, triggerId,
             buildJsonObject { put("precision", "inexact") }) }
@@ -179,7 +195,13 @@ class TriggerFiringService(
         if (params.toString().toByteArray(Charsets.UTF_8).size > maxEventBytes) return
         val hasLocal = entry.reqArr("on_fire").size > 0
         when (policy) {
-            "queue", "wake" -> when (val r = queue.admit(params, policy,
+            "queue", "wake" -> {
+                try {
+                    occurrenceTransaction?.begin()
+                } catch (_: Exception) {
+                    return
+                }
+                when (val r = queue.admit(params, policy,
                     entry.stringOr("dedupe").takeIf { it.isNotEmpty() },
                     entry.reqLong("ttl_s"), pendingLocal = hasLocal,
                     triggerIdentity = reg.identity)) {
@@ -191,13 +213,17 @@ class TriggerFiringService(
                     try {
                         commit() // step 3 (throttle + persist) + step 4 (on_fire)
                     } catch (_: Exception) {
+                        occurrenceTransaction?.abort()
                         queue.deleteRecord(r.record.reqLong("queue_seq"))
                         return
                     }
+                    occurrenceTransaction?.complete()
                     if (hasLocal) queue.clearPendingLocal(r.record.reqLong("queue_seq"))
                     pending.add { session.get()?.onDurableAdmitted(policy) } // step 5, post-lock
                 }
-                else -> Unit // durable transaction failed: no throttle, no on_fire
+                else -> occurrenceTransaction?.abort()
+                    // durable transaction failed: no throttle, no on_fire
+                }
             }
             // SPEC 21.2: a drop commits throttle + on_fire even with no session;
             // only the remote event is READY-gated (deferred, post-lock). A commit

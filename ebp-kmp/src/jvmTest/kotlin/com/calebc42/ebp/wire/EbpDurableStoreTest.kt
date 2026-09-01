@@ -693,6 +693,163 @@ class EbpDurableStoreTest {
         )
     }
 
+    @Test
+    fun reminderReceiptAndPresentationEffectCommitTogetherAndTupleChangesResetReceipt() =
+        runTest {
+            val store = MemoryEbpDurableStore()
+            val pairing = pairingId('8')
+            activate(store, pairing)
+            val original = reminder(atMs = 100, title = "Original")
+            assertEquals(
+                ReplaceRemindersResult.Replaced(1),
+                store.replaceReminders(
+                    ReplaceRemindersCommand(pairing, "agenda", listOf(original), 8),
+                ),
+            )
+            val effect = DurablePlatformEffect(
+                effectId = "reminder-agenda-r1-100",
+                kind = "notification.reminder",
+                payload = original.payload,
+                dedupeKey = "reminder:agenda:r1:100",
+                createdAtMs = 100,
+            )
+
+            store.failNextCommit()
+            expectInjectedFailure {
+                store.recordReminderFired(
+                    RecordReminderFiredCommand(
+                        pairing,
+                        "agenda",
+                        "r1",
+                        atMs = 100,
+                        firedAtMs = 100,
+                        presentationEffect = effect,
+                    ),
+                )
+            }
+            assertTrue(store.restore(pairing).reminderReceipts.isEmpty())
+            assertTrue(store.restore(pairing).platformEffects.isEmpty())
+
+            assertEquals(
+                RecordReminderFiredResult.Recorded,
+                store.recordReminderFired(
+                    RecordReminderFiredCommand(
+                        pairing,
+                        "agenda",
+                        "r1",
+                        atMs = 100,
+                        firedAtMs = 100,
+                        presentationEffect = effect,
+                    ),
+                ),
+            )
+            assertEquals(1, store.restore(pairing).reminderReceipts.size)
+            assertEquals(listOf(effect), store.restore(pairing).platformEffects)
+
+            store.replaceReminders(
+                ReplaceRemindersCommand(
+                    pairing,
+                    "agenda",
+                    listOf(reminder(atMs = 100, title = "Edited")),
+                    8,
+                ),
+            )
+            assertEquals(1, store.restore(pairing).reminderReceipts.size)
+
+            store.replaceReminders(
+                ReplaceRemindersCommand(
+                    pairing,
+                    "agenda",
+                    listOf(reminder(atMs = 101, title = "Rescheduled")),
+                    8,
+                ),
+            )
+            assertTrue(store.restore(pairing).reminderReceipts.isEmpty())
+        }
+
+    @Test
+    fun triggerRuntimeCarriesOnlyAcrossCanonicalIdentity() = runTest {
+        val store = MemoryEbpDurableStore()
+        val pairing = pairingId('9')
+        activate(store, pairing)
+        val initial = trigger(canonicalIdentity = "canonical-a", scheduleAnchorMs = 10)
+        assertEquals(
+            ReplaceTriggersResult.Replaced(1),
+            store.replaceTriggers(
+                ReplaceTriggersCommand(pairing, "device", listOf(initial), 8),
+            ),
+        )
+        store.write(pairing) {
+            putTrigger(
+                initial.copy(
+                    throttleFloorMs = 20,
+                    oneShotCompleted = true,
+                    scheduleAnchorMs = 10,
+                    lastFireFloorMs = 30,
+                    bootGeneration = "boot-1",
+                ),
+            )
+        }
+
+        store.replaceTriggers(
+            ReplaceTriggersCommand(
+                pairing,
+                "device",
+                listOf(initial.copy(entry = buildJsonObject {
+                    put("id", "t1")
+                    put("label", "presentation-only spelling")
+                })),
+                8,
+            ),
+        )
+        val carried = store.restore(pairing).triggers.single()
+        assertEquals(20L, carried.throttleFloorMs)
+        assertTrue(carried.oneShotCompleted)
+        assertEquals(30L, carried.lastFireFloorMs)
+        assertEquals("boot-1", carried.bootGeneration)
+
+        store.replaceTriggers(
+            ReplaceTriggersCommand(
+                pairing,
+                "device",
+                listOf(trigger("canonical-b", scheduleAnchorMs = 40)),
+                8,
+            ),
+        )
+        val reset = store.restore(pairing).triggers.single()
+        assertEquals(null, reset.throttleFloorMs)
+        assertFalse(reset.oneShotCompleted)
+        assertEquals(40L, reset.scheduleAnchorMs)
+        assertEquals(null, reset.lastFireFloorMs)
+        assertEquals(null, reset.bootGeneration)
+    }
+
+    @Test
+    fun expiredPlatformEffectLeaseCanBeReclaimedAndCompleted() = runTest {
+        val store = MemoryEbpDurableStore()
+        val pairing = pairingId('a')
+        activate(store, pairing)
+        val effect = DurablePlatformEffect(
+            effectId = "effect-1",
+            kind = "alarm.reconcile",
+            payload = JsonObject(emptyMap()),
+            dedupeKey = "alarm:owner",
+            createdAtMs = 1,
+        )
+        assertTrue(
+            store.enqueuePlatformEffect(pairing, effect) is
+                EnqueuePlatformEffectResult.Enqueued,
+        )
+        val first = checkNotNull(store.claimPlatformEffect(pairing, 10, leaseMs = 20))
+        assertEquals(1L, first.attemptCount)
+        assertEquals(null, store.claimPlatformEffect(pairing, 29, leaseMs = 20))
+        val reclaimed = checkNotNull(store.claimPlatformEffect(pairing, 30, leaseMs = 20))
+        assertEquals(2L, reclaimed.attemptCount)
+        assertTrue(store.completePlatformEffect(pairing, effect.effectId, 31))
+        assertEquals(DurablePlatformEffectState.COMPLETED,
+            store.restore(pairing).platformEffects.single().state)
+    }
+
     private suspend fun activate(store: EbpDurableStore, pairing: PairingId) {
         assertTrue(
             store.activatePairing(ActivatePairingCommand(pairing, createdAtMs = 0))
@@ -751,6 +908,30 @@ class EbpDurableStoreTest {
         put("occurred_at_ms", occurredAtMs)
         put("queued_at_ms", queuedAtMs)
     }
+
+    private fun reminder(atMs: Long, title: String) = DurableReminder(
+        owner = "agenda",
+        reminderId = "r1",
+        atMs = atMs,
+        authoredOrdinal = 0,
+        payload = buildJsonObject {
+            put("id", "r1")
+            put("at_ms", atMs)
+            put("title", title)
+        },
+    )
+
+    private fun trigger(
+        canonicalIdentity: String,
+        scheduleAnchorMs: Long,
+    ) = DurableTriggerRegistration(
+        identity = "device",
+        triggerId = "t1",
+        authoredOrdinal = 0,
+        entry = buildJsonObject { put("id", "t1") },
+        canonicalIdentity = canonicalIdentity,
+        scheduleAnchorMs = scheduleAnchorMs,
+    )
 
     private fun pairingId(hex: Char): PairingId =
         PairingId(hex.toString().repeat(32))
