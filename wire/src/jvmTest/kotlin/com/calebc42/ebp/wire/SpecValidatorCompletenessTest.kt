@@ -493,11 +493,54 @@ class SpecValidatorCompletenessTest {
                 putJsonObject("July 4") { put("dots", 1) }
             }),
             "YYYY-MM-DD")
+        rejects(node("month_grid", "month" to JsonPrimitive("2026-07"),
+            "marks" to buildJsonObject {
+                putJsonObject("2026-07-04") { put("dots", 1); put("label", "holiday") }
+            }),
+            "unknown member")
+        rejects(node("month_grid", "month" to JsonPrimitive("2026-07"),
+            "day_styles" to buildJsonObject {
+                putJsonObject("2026-07-04") { put("background", "primary") }
+            }),
+            "exactly background and foreground")
+        rejects(node("month_grid", "month" to JsonPrimitive("2026-07"),
+            "day_styles" to buildJsonObject {
+                putJsonObject("July 4") {
+                    put("background", "primary"); put("foreground", "on_primary")
+                }
+            }),
+            "YYYY-MM-DD")
+        rejects(node("month_grid", "month" to JsonPrimitive("2026-07"),
+            "range_start" to JsonPrimitive("2026-07-20")),
+            "must appear together")
+        rejects(node("month_grid", "month" to JsonPrimitive("2026-07"),
+            "range_start" to JsonPrimitive("2026-07-20"),
+            "range_end" to JsonPrimitive("2026-07-10")),
+            "must not follow")
+        rejects(node("month_grid", "month" to JsonPrimitive("2026-07"),
+            "range_start" to JsonPrimitive("2026-07-10"),
+            "range_end" to JsonPrimitive("2026-07-20"),
+            "selected" to JsonPrimitive("2026-07-12")),
+            "mutually exclusive")
+        rejects(node("month_grid", "month" to JsonPrimitive("2026-07"),
+            "disabled_weekdays" to JsonArray(listOf(1, 1).map(::JsonPrimitive))),
+            "distinct")
         accepts(node("month_grid", "month" to JsonPrimitive("2026-07"),
             "min_month" to JsonPrimitive("2026-01"), "max_month" to JsonPrimitive("2026-12"),
-            "selected" to JsonPrimitive("2026-07-04"),
+            "min_date" to JsonPrimitive("2026-01-01"), "max_date" to JsonPrimitive("2026-12-31"),
+            "range_start" to JsonPrimitive("2026-07-04"),
+            "range_end" to JsonPrimitive("2026-07-20"),
+            "disabled_weekdays" to JsonArray(listOf(0, 6).map(::JsonPrimitive)),
             "marks" to buildJsonObject {
                 putJsonObject("2026-07-04") { put("dots", 2); put("color", "primary") }
+            },
+            "day_styles" to buildJsonObject {
+                putJsonObject("2026-07-04") {
+                    put("background", "primary"); put("foreground", "on_primary")
+                }
+                putJsonObject("2026-07-20") {
+                    put("background", "error"); put("foreground", "on_error")
+                }
             }))
     }
 }

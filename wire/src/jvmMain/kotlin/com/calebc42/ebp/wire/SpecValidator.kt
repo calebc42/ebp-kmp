@@ -2193,7 +2193,11 @@ object SpecValidator {
         }
     }
 
-    /** SPEC 17.5: month formats, dots 0..3, min_month ≤ max_month. */
+    /**
+     * SPEC 17.5: validate calendar bounds, the closed mark shape, and the
+     * presentation-only day-style map. Date ordering is lexical because every
+     * accepted value is zero-padded ISO form.
+     */
     private fun validateMonthGrid(node: JsonObject, path: String) {
         val month = node.stringOrNull("month")
         if (month == null || !YYYY_MM.matches(month))
@@ -2214,15 +2218,75 @@ object SpecValidator {
             if (s == null || !YYYY_MM_DD.matches(s))
                 throw ContentInvalid("$path.selected", "must be YYYY-MM-DD")
         }
-        node.objOrNull("marks")?.let { marks ->
+        for (m in listOf("min_date", "max_date", "range_start", "range_end")) {
+            node[m]?.let {
+                val s = it.asStringOrNull()
+                if (s == null || !YYYY_MM_DD.matches(s))
+                    throw ContentInvalid("$path.$m", "must be YYYY-MM-DD")
+            }
+        }
+        val minDate = node.stringOrNull("min_date")
+        val maxDate = node.stringOrNull("max_date")
+        if (minDate != null && maxDate != null && minDate > maxDate)
+            throw ContentInvalid(path, "min_date must not follow max_date")
+
+        if ("disabled_weekdays" in node) {
+            val weekdays = node.arrOrNull("disabled_weekdays")
+                ?: throw ContentInvalid("$path.disabled_weekdays", "must be an array")
+            val distinct = mutableSetOf<Long>()
+            for (i in weekdays.indices) {
+                val day = integralLongOrNull(weekdays[i])
+                if (day == null || day !in 0L..6L)
+                    throw ContentInvalid("$path.disabled_weekdays[$i]", "must be an integer 0..6")
+                if (!distinct.add(day))
+                    throw ContentInvalid("$path.disabled_weekdays[$i]", "must be distinct")
+            }
+        }
+
+        val rangeStart = node.stringOrNull("range_start")
+        val rangeEnd = node.stringOrNull("range_end")
+        if ((rangeStart == null) != (rangeEnd == null))
+            throw ContentInvalid(path, "range_start and range_end must appear together")
+        if (rangeStart != null && rangeEnd != null && rangeStart > rangeEnd)
+            throw ContentInvalid(path, "range_start must not follow range_end")
+        if (rangeStart != null && "selected" in node)
+            throw ContentInvalid(path, "range is mutually exclusive with selected")
+
+        if ("marks" in node) {
+            val marks = node.objOrNull("marks")
+                ?: throw ContentInvalid("$path.marks", "must be an object")
             for ((key, value) in marks) {
                 if (!YYYY_MM_DD.matches(key))
                     throw ContentInvalid("$path.marks.$key", "keys must be YYYY-MM-DD")
                 val mark = value as? JsonObject
                     ?: throw ContentInvalid("$path.marks.$key", "must be an object")
+                val unknown = mark.keys - setOf("dots", "color")
+                if (unknown.isNotEmpty())
+                    throw ContentInvalid("$path.marks.$key", "unknown member ${unknown.sorted().first()}")
                 val dots = mark["dots"]?.asDoubleOrNull()
                 if (dots == null || dots != Math.floor(dots) || dots < 0 || dots > 3)
                     throw ContentInvalid("$path.marks.$key.dots", "must be an integer 0..3")
+                if ("color" in mark && mark.stringOrNull("color") == null)
+                    throw ContentInvalid("$path.marks.$key.color", "must be a Color string")
+            }
+        }
+
+        if ("day_styles" in node) {
+            val styles = node.objOrNull("day_styles")
+                ?: throw ContentInvalid("$path.day_styles", "must be an object")
+            for ((key, value) in styles) {
+                if (!YYYY_MM_DD.matches(key))
+                    throw ContentInvalid("$path.day_styles.$key", "keys must be YYYY-MM-DD")
+                val style = value as? JsonObject
+                    ?: throw ContentInvalid("$path.day_styles.$key", "must be an object")
+                if (style.keys != setOf("background", "foreground"))
+                    throw ContentInvalid("$path.day_styles.$key",
+                        "must contain exactly background and foreground")
+                for (member in listOf("background", "foreground")) {
+                    if (style.stringOrNull(member) == null)
+                        throw ContentInvalid("$path.day_styles.$key.$member",
+                            "must be a Color string")
+                }
             }
         }
     }
