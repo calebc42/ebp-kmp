@@ -152,6 +152,9 @@ object SpecValidator {
         // collection ancestor. The stack follows the ordinary Node walk,
         // including named slots and every retained variant branch.
         val semanticCollections = mutableListOf<SemanticCollectionBounds>()
+        // Extension semantic validators run only after this complete
+        // structural traversal and its deferred core references succeed.
+        val activeExtensions = mutableSetOf<String>()
         var nodeCount = 0
         // SPEC 4.5: max_rich_spans / max_table_cells are AGGREGATE counts
         // across one SurfaceSpec or dialog document, like max_chart_points.
@@ -327,11 +330,15 @@ object SpecValidator {
                 throw ContentInvalid(path, "surface root must be a node or a multi-view object")
             walkNode(spec, path, ctx)
         }
-        return finishDocument(ctx)
+        return finishDocument(ctx, spec, path)
     }
 
     /** Resolve whole-document references only after every atomic root was walked. */
-    private fun finishDocument(ctx: Ctx): Map<String, JsonObject> {
+    private fun finishDocument(
+        ctx: Ctx,
+        document: JsonObject,
+        path: String,
+    ): Map<String, JsonObject> {
         // SPEC 14.1: each capture name resolves to exactly one stateful node
         // in the document. IDs are unique across the document (SPEC 16.1),
         // so membership in `statefuls` is the exact resolution test.
@@ -374,6 +381,14 @@ object SpecValidator {
             if (requested != null && requested !in variantValues(host))
                 throw ContentInvalid("$refPath.value",
                     "must name a variant of the referenced host")
+        }
+        // Renderer-owned semantic passes see only a structurally admitted
+        // document and still run before SurfaceStore can mutate or persist.
+        // Stable extension order keeps diagnostics deterministic when more
+        // than one installed extension participates in a document.
+        for (extension in ctx.activeExtensions.sorted()) {
+            ctx.nodeVocabulary.extensionSemanticValidators[extension]
+                ?.validate(document, path)
         }
         return ctx.statefuls
     }
@@ -577,7 +592,7 @@ object SpecValidator {
                 walkRoot(variant["body"], "$variantPath.body")
             }
         }
-        val statefuls = finishDocument(ctx)
+        val statefuls = finishDocument(ctx, wrapper, path)
         if (statefuls.isNotEmpty())
             throw ContentInvalid(path, "stateful nodes are prohibited in widget surfaces")
     }
@@ -1399,6 +1414,7 @@ object SpecValidator {
         if (ctx.advertisedTypes != null && t !in ctx.advertisedTypes) return
         val row = ctx.nodeVocabulary.schema[t]
             ?: return // SPEC 16.2: unknown types degrade
+        ctx.nodeVocabulary.extensionOwner(t)?.let(ctx.activeExtensions::add)
         ctx.advertisedMembers?.let { support ->
             val nodeMembers = support.nodes[t]
                 ?: throw ContentInvalid(path, "target member map omits node type $t")
@@ -1449,6 +1465,9 @@ object SpecValidator {
         // assume every defaulting read was already type-checked here.
         for (member in row.required + row.optional)
             if (member in node) checkScalarFieldType(t, member, node, path)
+        ctx.nodeVocabulary.extensionSchemas[t]?.let { schema ->
+            validateExtensionNodeSchema(node, path, schema, ctx)
+        }
         ctx.nodeVocabulary.trueRequiresParent[t]?.let { rule ->
             validateTrueRequiresParent(node, path, parentType, rule)
         }
@@ -1702,6 +1721,205 @@ object SpecValidator {
             val id = node.stringOrNull("id")
                 ?: throw ContentInvalid(path, "$t requires an id")
             ctx.statefuls[id] = node
+        }
+    }
+
+    /** Validate every declared member in one advertised format-2 node. */
+    private fun validateExtensionNodeSchema(
+        node: JsonObject,
+        path: String,
+        schema: ExtensionNodeSchema,
+        ctx: Ctx,
+    ) {
+        for ((member, valueSchema) in schema.required) {
+            val value = node[member]
+                ?: throw ContentInvalid("$path.$member", "is required")
+            validateExtensionValue(
+                value,
+                "$path.$member",
+                valueSchema,
+                ctx,
+                member,
+                node.stringOrNull("id"),
+            )
+        }
+        for ((member, valueSchema) in schema.optional) {
+            node[member]?.let { value ->
+                validateExtensionValue(
+                    value,
+                    "$path.$member",
+                    valueSchema,
+                    ctx,
+                    member,
+                    node.stringOrNull("id"),
+                )
+            }
+        }
+    }
+
+    /** Recursively validate one finite renderer-owned value grammar. */
+    private fun validateExtensionValue(
+        value: JsonElement,
+        path: String,
+        schema: ExtensionValueSchema,
+        ctx: Ctx,
+        memberName: String? = null,
+        ownerId: String? = null,
+    ) {
+        fun invalid(reason: String): Nothing = throw ContentInvalid(path, reason)
+        when (schema) {
+            ExtensionValueSchema.BooleanValue -> {
+                val primitive = value as? kotlinx.serialization.json.JsonPrimitive
+                if (primitive == null || primitive.isString ||
+                    primitive.content.toBooleanStrictOrNull() == null) {
+                    invalid("must be a boolean")
+                }
+            }
+            is ExtensionValueSchema.IntegerValue -> {
+                val number = integralLongOrNull(value)
+                    ?: invalid("must be an integer")
+                if (number !in schema.minimum..schema.maximum) {
+                    invalid("must be within ${schema.minimum}..${schema.maximum}")
+                }
+            }
+            is ExtensionValueSchema.NumberValue -> {
+                val number = value.asDoubleOrNull()
+                if (number == null || !number.isFinite()) {
+                    invalid("must be a finite number")
+                }
+                if (number < schema.minimum || number > schema.maximum) {
+                    invalid("must be within ${schema.minimum}..${schema.maximum}")
+                }
+            }
+            is ExtensionValueSchema.StringValue -> {
+                val string = value.asStringOrNull()
+                    ?: invalid("must be a string")
+                if (string.length !in schema.minimumLength..schema.maximumLength) {
+                    invalid(
+                        "string length must be within " +
+                            "${schema.minimumLength}..${schema.maximumLength}",
+                    )
+                }
+            }
+            is ExtensionValueSchema.EnumValue -> {
+                val string = value.asStringOrNull()
+                    ?: invalid("must be a string enum value")
+                if (string !in schema.values) {
+                    invalid("must be one of ${schema.values.sorted()}")
+                }
+            }
+            is ExtensionValueSchema.ObjectValue -> {
+                val objectValue = value as? JsonObject
+                    ?: invalid("must be an object")
+                val allowed = schema.required.keys + schema.optional.keys
+                objectValue.keys.filter { it !in allowed }.sorted().firstOrNull()
+                    ?.let { unknown ->
+                        throw ContentInvalid("$path.$unknown", "unknown object member")
+                    }
+                for ((member, childSchema) in schema.required) {
+                    val child = objectValue[member]
+                        ?: throw ContentInvalid("$path.$member", "is required")
+                    validateExtensionValue(
+                        child,
+                        "$path.$member",
+                        childSchema,
+                        ctx,
+                        member,
+                        ownerId,
+                    )
+                }
+                for ((member, childSchema) in schema.optional) {
+                    objectValue[member]?.let { child ->
+                        validateExtensionValue(
+                            child,
+                            "$path.$member",
+                            childSchema,
+                            ctx,
+                            member,
+                            ownerId,
+                        )
+                    }
+                }
+            }
+            is ExtensionValueSchema.ArrayValue -> {
+                val array = value as? JsonArray ?: invalid("must be an array")
+                if (array.size !in schema.minimumItems..schema.maximumItems) {
+                    invalid(
+                        "array size must be within " +
+                            "${schema.minimumItems}..${schema.maximumItems}",
+                    )
+                }
+                array.forEachIndexed { index, child ->
+                    validateExtensionValue(
+                        child,
+                        "$path[$index]",
+                        schema.items,
+                        ctx,
+                        ownerId = ownerId,
+                    )
+                }
+            }
+            is ExtensionValueSchema.IdentifierMapValue -> {
+                val map = value as? JsonObject
+                    ?: invalid("must be an identifier map")
+                if (map.size !in schema.minimumEntries..schema.maximumEntries) {
+                    invalid(
+                        "map size must be within " +
+                            "${schema.minimumEntries}..${schema.maximumEntries}",
+                    )
+                }
+                for ((identifier, child) in map) {
+                    if (!IDENTIFIER.matches(identifier) ||
+                        identifier.toByteArray(Charsets.UTF_8).size >
+                            WireLimits.MAX_IDENTIFIER_OCTETS) {
+                        throw ContentInvalid("$path.$identifier", "invalid identifier key")
+                    }
+                    validateExtensionValue(
+                        child,
+                        "$path.$identifier",
+                        schema.values,
+                        ctx,
+                        ownerId = ownerId,
+                    )
+                }
+            }
+            ExtensionValueSchema.NodeValue -> {
+                val child = value as? JsonObject ?: invalid("must be a node")
+                if (child.stringOrNull("t") == null) {
+                    invalid("node missing discriminator t")
+                }
+            }
+            is ExtensionValueSchema.NodeArrayValue -> {
+                val children = value as? JsonArray
+                    ?: invalid("must be an array of nodes")
+                if (children.size !in schema.minimumItems..schema.maximumItems) {
+                    invalid(
+                        "node array size must be within " +
+                            "${schema.minimumItems}..${schema.maximumItems}",
+                    )
+                }
+                children.forEachIndexed { index, child ->
+                    val node = child as? JsonObject
+                        ?: throw ContentInvalid("$path[$index]", "must be a node")
+                    if (node.stringOrNull("t") == null) {
+                        throw ContentInvalid(
+                            "$path[$index]",
+                            "node missing discriminator t",
+                        )
+                    }
+                }
+            }
+            ExtensionValueSchema.ActionDescriptorValue -> {
+                val descriptor = value as? JsonObject
+                    ?: invalid("must be an ActionDescriptor")
+                validateAction(
+                    descriptor,
+                    path,
+                    memberName ?: "extension.action",
+                    ctx,
+                    ownerId,
+                )
+            }
         }
     }
 

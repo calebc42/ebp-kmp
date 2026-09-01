@@ -56,7 +56,9 @@ data class TrueRequiresParentRule(
  *
  * [extensions] maps each positively advertised extension identifier to the
  * node types its provider owns. Ownership is receiver configuration, never
- * inferred from a node-name prefix.
+ * inferred from a node-name prefix. [extensionSchemas] adds typed member
+ * validation for format-2 manifests, while [extensionSemanticValidators]
+ * installs whole-document invariants after every structural pass succeeds.
  */
 data class NodeVocabulary(
     val schema: Map<String, NodeRow> = NODE_SCHEMA,
@@ -70,7 +72,11 @@ data class NodeVocabulary(
     val selectionOptions: Map<String, SelectionOptionsRule> = emptyMap(),
     val trueRequiresParent: Map<String, TrueRequiresParentRule> = emptyMap(),
     val extensions: Map<String, Set<String>> = emptyMap(),
+    val extensionSchemas: Map<String, ExtensionNodeSchema> = emptyMap(),
+    val extensionSemanticValidators: Map<String, ExtensionSemanticValidator> = emptyMap(),
 ) {
+    private val extensionOwners: Map<String, String>
+
     init {
         require(extensions.keys.all { it.contains('.') }) {
             "Renderer extension identifiers must be namespaced"
@@ -86,6 +92,7 @@ data class NodeVocabulary(
                 }
             }
         }
+        extensionOwners = owners.toMap()
         require((statefulTypes + statefulWhenPresent.keys + localEditorTypes)
             .all { it in schema }) {
             "Stateful rules must name installed node schemas"
@@ -127,9 +134,23 @@ data class NodeVocabulary(
                 rule.parentTypes.all { it in schema }
         }) {
             "True-requires-parent constraints must name optional schema members " +
-                "and installed parent types"
+            "and installed parent types"
+        }
+        require(extensionSchemas.all { (nodeType, typed) ->
+            val row = schema[nodeType] ?: return@all false
+            nodeType in extensionOwners &&
+                typed.required.keys == row.required &&
+                typed.optional.keys == row.optional
+        }) {
+            "Typed extension schemas must exactly match an owned node schema"
+        }
+        require(extensionSemanticValidators.keys.all { it in extensions }) {
+            "Extension semantic validators must name installed extensions"
         }
     }
+
+    /** The positively configured extension that owns [nodeType], if any. */
+    fun extensionOwner(nodeType: String): String? = extensionOwners[nodeType]
 
     /** Whether [node] contributes durable input state under its installed rule. */
     fun isStateful(nodeType: String, node: kotlinx.serialization.json.JsonObject): Boolean {
