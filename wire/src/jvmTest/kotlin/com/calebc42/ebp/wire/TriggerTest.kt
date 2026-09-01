@@ -41,12 +41,22 @@ class TriggerTest {
         put("trackable_state_types", JsonArray(caps.trackableStateTypes.map(::JsonPrimitive)))
     }
 
-    private fun engine(out: MutableList<JsonObject>, grant: Boolean = true): CompanionEngine {
-        val wants = if (grant) listOf("triggers") else emptyList()
+    private fun engine(
+        out: MutableList<JsonObject>,
+        grant: Boolean = true,
+        offlineWakeGranted: Boolean = false,
+    ): CompanionEngine {
+        val wants = if (grant) {
+            listOf("triggers") + if (offlineWakeGranted) listOf("offline.wake") else emptyList()
+        } else {
+            emptyList()
+        }
+        val supported = setOf("triggers") +
+            if (offlineWakeGranted) setOf("offline.wake") else emptySet()
         val engine = CompanionEngine(CompanionConfig(
             serverName = "kat", serverVersion = "1",
             pairings = mapOf(katPid to katToken),
-            supportedCapabilities = setOf("triggers"),
+            supportedCapabilities = supported,
             surfaceProfiles = buildJsonObject {
                 putJsonObject("app") {
                     put("node_types", JsonArray(
@@ -125,6 +135,23 @@ class TriggerTest {
         val engine = engine(out, grant = false)
         set(engine, "s1", trig("t", "boot"))
         assertEquals(-32601L, out.errorOf("s1").reqLong("code"))
+    }
+
+    @Test
+    fun wakePolicyRequiresTheCurrentSessionGrant() {
+        fun wakeTrigger() = trig("wake", "boot") {
+            put("policy", "wake")
+            put("ttl_s", 60)
+        }
+
+        val denied = mutableListOf<JsonObject>()
+        set(engine(denied), "s1", wakeTrigger())
+        assertEquals(1101L, denied.errorOf("s1").reqLong("code"))
+        assertEquals("wake requires the offline.wake grant", reason(denied, "s1"))
+
+        val allowed = mutableListOf<JsonObject>()
+        set(engine(allowed, offlineWakeGranted = true), "s2", wakeTrigger())
+        assertEquals(1L, count(allowed, "s2"))
     }
 
     @Test

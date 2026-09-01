@@ -438,6 +438,28 @@ class SurfaceStoreTest {
     }
 
     @Test
+    fun wakeActionRequiresTheCurrentSessionGrant() {
+        val spec = button(buildJsonObject {
+            put("action", "focus.toggle")
+            put("when_offline", "wake")
+            put("ttl_s", 60)
+        })
+        rejects(store(), spec, "offline.wake")
+        assertEquals(
+            "applied",
+            store().update(
+                "app:x",
+                1,
+                spec,
+                null,
+                null,
+                null,
+                offlineWakeGranted = true,
+            ).status,
+        )
+    }
+
+    @Test
     fun malformedNodeRejectsInsteadOfCrashing() {
         // SPEC 16.1: a wrong-typed required member is a recoverable 1201,
         // never a thrown getter that tears the session down (audit P1 #3).

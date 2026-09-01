@@ -25,7 +25,9 @@ class OnFireTest {
         stateTypes = setOf("battery.level"),
         trackableStateTypes = setOf("battery.level"),
         triggerCaps = setOf("vibrate"), maxResponses = 4,
-        sensitiveSubstitutionApproved = approved)
+        sensitiveSubstitutionApprovals = if (approved) setOf(
+            SensitiveSubstitutionApproval("sms.received", "notification"),
+        ) else emptySet())
 
     private val state = HashMap<String, JsonObject>()
     private val ran = mutableListOf<JsonObject>()
@@ -133,6 +135,44 @@ class OnFireTest {
     }
 
     @Test
+    fun sensitiveApprovalDoesNotCrossSourcesOrSinks() {
+        val smsToVibrate = trig("s", "sms.received") {
+            putJsonArray("on_fire") { add(buildJsonObject {
+                put("cap", "vibrate")
+                putJsonObject("args") { put("pattern", "\${data.body}") }
+            }) }
+        }
+        val notificationOnly = caps().copy(
+            sensitiveSubstitutionApprovals = setOf(
+                SensitiveSubstitutionApproval("sms.received", "notification"),
+            ),
+        )
+        assertFalse(runCatching {
+            TriggerValidator.validateSet(buildJsonObject {
+                putJsonArray("triggers") { add(smsToVibrate) }
+            }, notificationOnly)
+        }.isSuccess)
+    }
+
+    @Test
+    fun queuedSensitiveSourcesRequireEncryptedHostStorage() {
+        val queuedSms = trig("s", "sms.received") {
+            put("policy", "queue")
+            put("ttl_s", 60)
+        }
+        assertFalse(runCatching {
+            TriggerValidator.validateSet(buildJsonObject {
+                putJsonArray("triggers") { add(queuedSms) }
+            }, caps())
+        }.isSuccess)
+        assertTrue(runCatching {
+            TriggerValidator.validateSet(buildJsonObject {
+                putJsonArray("triggers") { add(queuedSms) }
+            }, caps().copy(sensitiveQueueEncrypted = true))
+        }.isSuccess)
+    }
+
+    @Test
     fun nonSensitiveDataNeedsNoApproval() {
         // battery.level data into a sink is fine without approval.
         val ok = TriggerValidator.validateSet(buildJsonObject {
@@ -155,14 +195,25 @@ class OnFireTest {
 
     @Test
     fun forbiddenCapRejectedInOnFire() {
-        val badCaps = caps().copy(triggerCaps = setOf("vibrate", "clipboard.read"))
-        var rejected = false
-        try {
-            TriggerValidator.validateSet(buildJsonObject { putJsonArray("triggers") { add(
-                trig("b", "manual") {
-                    putJsonArray("on_fire") { add(buildJsonObject { put("cap", "clipboard.read") }) }
-                }) } }, badCaps)
-        } catch (e: ContentInvalid) { rejected = true }
-        assertTrue(rejected) // clipboard.read is forbidden in on_fire even if advertised
+        // Explicitly forbidden/interactive caps and catalog rows with a
+        // non-empty Result remain invalid even if a host misadvertises them.
+        for (cap in listOf("app.launch", "clipboard.read", "volume.set", "state.get")) {
+            val badCaps = caps().copy(triggerCaps = setOf("vibrate", cap))
+            val accepted = runCatching {
+                TriggerValidator.validateSet(
+                    buildJsonObject {
+                        putJsonArray("triggers") {
+                            add(trig("b", "manual") {
+                                putJsonArray("on_fire") {
+                                    add(buildJsonObject { put("cap", cap) })
+                                }
+                            })
+                        }
+                    },
+                    badCaps,
+                )
+            }.isSuccess
+            assertFalse("accepted forbidden trigger cap $cap", accepted)
+        }
     }
 }

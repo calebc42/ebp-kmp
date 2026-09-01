@@ -24,9 +24,12 @@ import org.junit.Test
 class TriggerRuntimeTest {
 
     private val caps = TriggerCaps(
-        triggerTypes = setOf("battery.level", "screen", "state.edge", "boot", "manual", "power"),
-        stateTypes = setOf("battery.level", "screen", "power"),
-        trackableStateTypes = setOf("battery.level", "screen", "power"),
+        triggerTypes = setOf(
+            "battery.level", "screen", "state.edge", "boot", "manual", "power",
+            "package", "network", "calendar.event", "sms.received", "call.state",
+        ),
+        stateTypes = setOf("battery.level", "screen", "power", "call.state"),
+        trackableStateTypes = setOf("battery.level", "screen", "power", "call.state"),
         triggerCaps = setOf("vibrate"), maxResponses = 4)
 
     private var clock = 1_000L
@@ -188,6 +191,119 @@ class TriggerRuntimeTest {
         register(trig("m1", "manual"), trig("m2", "manual"))
         rt.fireManual("id", "m1", buildJsonObject { put("source", "emacs") })
         assertEquals(listOf("m1"), firedIds()) // not m2
+    }
+
+    @Test
+    fun externalFiltersMatchAndPrivateSelectionFieldsDoNotLeak() {
+        register(
+            trig("pkg", "package") {
+                putJsonObject("params") {
+                    put("event", "added")
+                    put("package", "example.app")
+                }
+            },
+            trig("net", "network") {
+                putJsonObject("params") { put("transport", "wifi") }
+            },
+            trig("cal", "calendar.event") {
+                putJsonObject("params") {
+                    put("calendar", "work")
+                    put("title_contains", "Review")
+                }
+            },
+        )
+        rt.onExternal("id", "package", buildJsonObject {
+            put("event", "added"); put("package", "other.app")
+        })
+        rt.onExternal("id", "package", buildJsonObject {
+            put("event", "added"); put("package", "example.app"); put("private", true)
+        })
+        rt.onExternal("id", "network", buildJsonObject {
+            put("event", "available"); put("transport", "cellular")
+        })
+        rt.onExternal("id", "network", buildJsonObject {
+            put("event", "available"); put("transport", "wifi"); put("private", true)
+        })
+        rt.onExternal("id", "calendar.event", buildJsonObject {
+            put("event", "started")
+            put("calendar", "work")
+            put("title", "Quarterly Review")
+            put("begin_ms", 10)
+            put("end_ms", 20)
+        })
+        assertEquals(listOf("pkg", "net", "cal"), firedIds())
+        assertEquals(setOf("event", "package"), fired[0].second.keys)
+        assertEquals(setOf("event", "transport"), fired[1].second.keys)
+        assertEquals(setOf("event", "title", "begin_ms", "end_ms"), fired[2].second.keys)
+    }
+
+    @Test
+    fun smsAndCallApplyPrivacyProjectionPerRegistration() {
+        register(trig("sms", "sms.received") {
+            putJsonObject("params") {
+                put("from", "+15550001")
+                put("contains", "code")
+            }
+        })
+        rt.onExternal("id", "sms.received", buildJsonObject {
+            put("from", "+15550001"); put("body", "your code is 1234")
+        })
+        assertEquals(setOf("from"), fired.single().second.keys)
+
+        fired.clear()
+        state["call.state"] = buildJsonObject { put("state", "idle") }
+        register(trig("call", "call.state") {
+            putJsonObject("params") {
+                put("state", "ringing")
+                put("number", "+15550002")
+                put("include_number", true)
+            }
+        })
+        sample("call.state", buildJsonObject {
+            put("state", "ringing"); put("number", "+15559999")
+        })
+        // Some Android releases first report the state and enrich the same
+        // state with a number in a later protected broadcast. Entering the
+        // number-filtered side is the occurrence; it must not require an
+        // artificial state round-trip through idle.
+        sample("call.state", buildJsonObject {
+            put("state", "ringing"); put("number", "+15550002")
+        })
+        assertEquals(listOf("call"), firedIds())
+        assertEquals("+15550002", fired.single().second.reqString("number"))
+
+        fired.clear()
+        sample("call.state", buildJsonObject { put("state", "idle") })
+        sample("call.state", buildJsonObject {
+            put("state", "ringing"); put("number", "+15550002")
+        })
+        assertEquals(listOf("call"), firedIds())
+        assertEquals("+15550002", fired.single().second.reqString("number"))
+    }
+
+    @Test
+    fun filteredCalendarPredicateUsesHostProbeAndOtherwiseFailsClosed() {
+        val predicate = buildJsonObject {
+            put("type", "calendar.event")
+            put("calendar", "work")
+            put("title_contains", "Review")
+        }
+        val samples = mapOf(
+            "calendar.event" to buildJsonObject { put("ongoing", true) },
+        )
+        val failClosed = StatePredicateEvaluator(
+            now = { clock },
+            zone = { ZoneId.of("UTC") },
+            stateProvider = samples::get,
+        )
+        assertTrue(!failClosed.holds(predicate))
+        val probed = StatePredicateEvaluator(
+            now = { clock },
+            zone = { ZoneId.of("UTC") },
+            stateProvider = samples::get,
+            predicateProvider = { if (it == predicate) true else null },
+        )
+        assertTrue(probed.holds(predicate))
     }
 
     // -------------------------------------- engine integration: real event

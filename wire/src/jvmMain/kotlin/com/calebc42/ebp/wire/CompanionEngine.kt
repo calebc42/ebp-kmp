@@ -37,12 +37,21 @@ data class CompanionConfig(
      * or `triggers` is granted. Its `caps` are the exact capability.invoke
      * catalog this Companion supports; empty means neither module is offered. */
     val deviceReport: JsonObject = JsonObject(emptyMap()),
+    /**
+     * Optional connection-time report source. Hosts whose permission or app
+     * inventory changes at runtime use this to give each new session a fresh,
+     * internally consistent snapshot. The result remains subject to the same
+     * reservation and schema checks as [deviceReport].
+     */
+    val deviceReportProvider: (() -> JsonObject)? = null,
     /** SPEC 20.2: the platform executor for capability.invoke. REQUIRED when
      * `device.caps` is non-empty; a null handler fails every invoke as 1003. */
     val capabilityHandler: CapabilityHandler? = null,
-    /** SPEC 21.4: whether the user approved substituting sensitive-source
-     * (sms/call/calendar) trigger data into an on_fire sink. Default deny. */
-    val sensitiveSubstitutionApproved: Boolean = false,
+    /** SPEC 21.4 approvals, each scoped to one sensitive source and sink. */
+    val sensitiveSubstitutionApprovals: Set<SensitiveSubstitutionApproval> = emptySet(),
+    /** True only when queued sms/call fire data is protected at rest by the
+     * host platform's keystore-backed identity-scoped storage. */
+    val sensitiveQueueEncrypted: Boolean = false,
     /** Nonce source, injectable for tests. */
     val nonceSource: () -> String = EbpAuth::generateNonce,
     /**
@@ -69,7 +78,11 @@ class CompanionEngine(
         builtinsFromProfiles(config.surfaceProfiles, "notification"),
         featuresFromProfiles(config.surfaceProfiles, "app"),
         featuresFromProfiles(config.surfaceProfiles, "notification"),
-        config.nodeVocabulary),
+        builtinsFromProfiles(config.surfaceProfiles, "tile"),
+        featuresFromProfiles(config.surfaceProfiles, "tile"),
+        null,
+        config.nodeVocabulary,
+        offlineWakeConfigured = "offline.wake" in config.supportedCapabilities),
     /** Shared across connections AND restarts: the SPEC 15 durable queue. */
     val queue: DurableQueue = DurableQueue(
         MemoryQueueStore(),
@@ -90,6 +103,8 @@ class CompanionEngine(
         capabilityHandler = config.capabilityHandler),
     private val sink: (ByteArray) -> Unit,
 ) : LiveSession {
+    /** One immutable snapshot for this connection; never mix permission eras. */
+    private val deviceReport = config.deviceReportProvider?.invoke() ?: config.deviceReport
     private val proofProvider: CompanionProofProvider =
         config.proofProvider ?: InMemoryCompanionProofProvider(config.pairings)
 
@@ -833,7 +848,8 @@ class CompanionEngine(
                                 )
                             }
                         }
-                        if (policy == "wake" && state != SessionState.READY &&
+                        if (policy == "wake" && "offline.wake" in granted &&
+                            state != SessionState.READY &&
                             queue.effectiveNow() - lastWakeMs >= 60_000) {
                             lastWakeMs = queue.effectiveNow()
                             runCatching { wakeListener?.invoke() }
@@ -1174,6 +1190,7 @@ class CompanionEngine(
         val requiredCap = when (surfaces.namespace(surface)) {
             "notification" -> "surfaces.notification"
             "widget" -> "surfaces.widget"
+            "tile" -> "surfaces.tile"
             else -> null
         }
         if (requiredCap != null && requiredCap !in granted)
@@ -1182,7 +1199,9 @@ class CompanionEngine(
         // SPEC 19: count distinct synchronized-editor identities the whole
         // mutation would yield — every other surface's editors plus this
         // spec's — and reject before applying if it exceeds the limit.
-        val newEditors = if ("editor.sync" in granted) scanSyncedEditors(spec)
+        val newEditors = if (
+            "editor.sync" in granted && surfaces.namespace(surface) == "app"
+        ) scanSyncedEditors(spec)
             else emptyMap()
         val othersEditorCount = editorIdentityCount(excludingSurface = surface)
         if (othersEditorCount + newEditors.size >
@@ -1227,7 +1246,8 @@ class CompanionEngine(
                 surface, revision, spec,
                 params.objOrNull("stale_spec"),
                 params.stringOrNull("current_view"),
-                params.arrOrNull("reset_input_ids"))
+                params.arrOrNull("reset_input_ids"),
+                offlineWakeGranted = "offline.wake" in granted)
             respondResult(id, buildJsonObject {
                 put("status", result.status)
                 put("revision", result.revision)
@@ -1627,11 +1647,15 @@ class CompanionEngine(
     /** SPEC 18.3: a pie-menu descriptor is a remote action, drop-only, with
      * no authored conflict on the injected members. */
     private fun validPieDescriptor(d: JsonObject?): Boolean {
-        if (d == null || d.stringOrNull("action") == null) return false
+        if (d == null) return false
         if (d.stringOr("when_offline", OFFLINE_DEFAULT) != "drop") return false
-        val args = d.objOrNull("args") ?: return true
-        return !("menu_id" in args || "category_index" in args ||
-            "item_index" in args)
+        return runCatching {
+            SpecValidator.validateContextlessRemoteAction(
+                d,
+                "categories.on_tap",
+                injectedMembers = setOf("menu_id", "category_index", "item_index"),
+            )
+        }.isSuccess
     }
 
     /**
@@ -1673,6 +1697,31 @@ class CompanionEngine(
         dispatchContextless(queue, config.limits.reqLong("max_event_bytes"),
             descriptor, args, this, callback)
 
+    /**
+     * Dispatch an accepted context-less platform-slot action (currently a
+     * `tile:*` tap). The caller supplies only receiver-owned injected members;
+     * accept-time validation has already rejected authored conflicts and
+     * context-dependent builtins.
+     */
+    @Synchronized
+    fun dispatchContextlessAction(
+        descriptor: JsonObject,
+        injected: JsonObject,
+        callback: ((ActionAdmissionOutcome) -> Unit)? = null,
+    ) {
+        if ("builtin" in descriptor) {
+            callback?.invoke(executeBuiltin("", descriptor))
+            return
+        }
+        val args = buildJsonObject {
+            descriptor.objOrNull("args")?.forEach { (key, value) -> put(key, value) }
+            injected.forEach { (key, value) -> put(key, value) }
+        }
+        dispatchDescriptorContextless(descriptor, args) { status, error ->
+            callback?.invoke(actionAdmissionOutcome(status, error))
+        }
+    }
+
     // ------- LiveSession: the connection-bound half of a context-less event.
     // Held as a newest-wins slot by cold senders (reminder taps, the firing
     // service); invoked never while the caller holds another module's monitor.
@@ -1690,7 +1739,8 @@ class CompanionEngine(
     /** SPEC 15.3: after a durable admit, wake (for `wake`) and advance the pump. */
     @Synchronized
     override fun onDurableAdmitted(policy: String) {
-        if (policy == "wake" && state != SessionState.READY &&
+        if (policy == "wake" && "offline.wake" in granted &&
+            state != SessionState.READY &&
             queue.effectiveNow() - lastWakeMs >= 60_000) {
             lastWakeMs = queue.effectiveNow()
             wakeListener?.invoke()
@@ -1728,7 +1778,11 @@ class CompanionEngine(
                         put("reason", "not-an-object")
                     })
             try {
-                validateReminder(r, seen)
+                validateReminder(
+                    r,
+                    seen,
+                    offlineWakeGranted = "offline.wake" in granted,
+                )
             } catch (e: ContentInvalid) {
                 return respondError(id, 1201, "Invalid content", "content-invalid",
                     buildJsonObject {
@@ -1757,7 +1811,11 @@ class CompanionEngine(
         reminderListener?.invoke(owner, JsonArray(parsed), JsonArray(prior))
     }
 
-    private fun validateReminder(r: JsonObject, seen: MutableSet<String>) {
+    private fun validateReminder(
+        r: JsonObject,
+        seen: MutableSet<String>,
+        offlineWakeGranted: Boolean,
+    ) {
         for (k in r.keys) if (k !in reminderMembers)
             throw ContentInvalid(k, "unknown reminder member")
         val rid = r.stringOrNull("id")
@@ -1777,20 +1835,23 @@ class CompanionEngine(
         if (at == null || at < 0 || at > 9_007_199_254_740_991L)
             throw ContentInvalid("at_ms", "must be a non-negative integer timestamp")
         r.objOrNull("on_tap")?.let { onTap ->
-            if (onTap.stringOrNull("action") == null)
-                throw ContentInvalid("on_tap", "must be a remote ActionDescriptor")
-            val policy = onTap.stringOr("when_offline", OFFLINE_DEFAULT)
-            if ((policy == "queue" || policy == "wake") && "ttl_s" !in onTap)
-                throw ContentInvalid("on_tap", "$policy requires ttl_s")
             // SPEC 14.5/18.6: capture_fields is surface/dialog-scoped — a
             // reminder tap has no input state to capture from (#133).
             if ("capture_fields" in onTap)
                 throw ContentInvalid("on_tap", "capture_fields is surface/dialog-scoped")
-            // SPEC 18.6: the injected members must not be authored.
-            onTap.objOrNull("args")?.let { a ->
-                if ("owner" in a || "reminder_id" in a)
+            // SPEC 18.6: the occurrence supplies these values. Preserve the
+            // established reminder-specific diagnostic before delegating the
+            // rest of the descriptor to the shared validator.
+            onTap.objOrNull("args")?.let { args ->
+                if ("owner" in args || "reminder_id" in args)
                     throw ContentInvalid("on_tap.args", "owner/reminder_id are injected")
             }
+            SpecValidator.validateContextlessRemoteAction(
+                onTap,
+                "on_tap",
+                injectedMembers = setOf("owner", "reminder_id"),
+                offlineWakeGranted = offlineWakeGranted,
+            )
         }
     }
 
@@ -1821,6 +1882,11 @@ class CompanionEngine(
     var triggerStateProvider: (String) -> JsonObject?
         get() = firing.stateProvider
         set(v) { firing.stateProvider = v }
+
+    /** SPEC 21.7 host seam for predicate-specific state such as calendar filters. */
+    var triggerStatePredicateProvider: (JsonObject) -> Boolean?
+        get() = firing.statePredicateProvider
+        set(v) { firing.statePredicateProvider = v }
 
     /** SPEC 21.4: post a substituted on_fire notification (delegates to the
      * shared firing service). */
@@ -1861,12 +1927,14 @@ class CompanionEngine(
         val identity = pendingPairingId
             ?: return respondError(id, 1200, "Not authenticated", "not-authenticated")
         val caps = TriggerCaps(
-            triggerTypes = jsonStringSet(config.deviceReport, "trigger_types"),
-            stateTypes = jsonStringSet(config.deviceReport, "state_types"),
-            trackableStateTypes = jsonStringSet(config.deviceReport, "trackable_state_types"),
-            triggerCaps = jsonStringSet(config.deviceReport, "trigger_caps"),
+            triggerTypes = jsonStringSet(deviceReport, "trigger_types"),
+            stateTypes = jsonStringSet(deviceReport, "state_types"),
+            trackableStateTypes = jsonStringSet(deviceReport, "trackable_state_types"),
+            triggerCaps = jsonStringSet(deviceReport, "trigger_caps"),
             maxResponses = config.limits.longOr("max_trigger_responses", 16).toInt(),
-            sensitiveSubstitutionApproved = config.sensitiveSubstitutionApproved)
+            sensitiveSubstitutionApprovals = config.sensitiveSubstitutionApprovals,
+            sensitiveQueueEncrypted = config.sensitiveQueueEncrypted,
+            offlineWakeGranted = "offline.wake" in granted)
         val entries = try {
             TriggerValidator.validateSet(params, caps)
         } catch (e: ContentInvalid) {
@@ -1935,12 +2003,12 @@ class CompanionEngine(
         }
         // SPEC 20.2: cap MUST appear in device.caps, else 1001. A non-string
         // entry never equals a string cap name, before and after the swap.
-        val caps = config.deviceReport.arrOrNull("caps") ?: JsonArray(emptyList())
+        val caps = deviceReport.arrOrNull("caps") ?: JsonArray(emptyList())
         if (caps.none { it.asStringOrNull() == cap })
             return respondError(id, 1001, "Unsupported capability", "cap-unsupported")
         // SPEC 20.3: validate the closed Args before any side effect.
         try {
-            CapabilityCatalog.validateArgs(cap, args)
+            CapabilityCatalog.validateArgs(cap, args, capabilityValidationContext())
         } catch (e: ContentInvalid) {
             return respondError(id, -32602, "Invalid params", "invalid-params",
                 buildJsonObject { put("path", e.path); put("reason", e.reason) })
@@ -1950,12 +2018,37 @@ class CompanionEngine(
             ?: return respondError(id, 1003, "Capability failed", "cap-failed",
                 buildJsonObject { put("reason", "no-handler") })
         when (val out = handler.invoke(cap, args)) {
-            is CapabilityOutcome.Ok -> respondResult(id, out.result)
+            is CapabilityOutcome.Ok -> {
+                try {
+                    CapabilityCatalog.validateResult(
+                        cap,
+                        out.result,
+                        capabilityValidationContext(),
+                    )
+                } catch (_: ContentInvalid) {
+                    return respondError(id, -32603, "Invalid capability result", "internal-error")
+                }
+                respondResult(id, out.result)
+            }
             is CapabilityOutcome.Fail -> respondError(id, out.code, "Capability failed",
                 if (out.code == 1002) "cap-permission" else "cap-failed",
-                buildJsonObject { put("reason", out.reason) })
+                buildJsonObject {
+                    put("reason", out.reason)
+                    if (out.code == 1002) out.permission?.let { put("permission", it) }
+                })
         }
     }
+
+    private fun capabilityValidationContext() = CapabilityValidationContext(
+        stateTypes = jsonStringSet(deviceReport, "state_types"),
+        maxShortcutIconBytes = config.limits.longOr(
+            "max_shortcut_icon_bytes",
+            Long.MAX_VALUE,
+        ),
+        maxShortcuts = config.limits.longOr("max_shortcuts", Long.MAX_VALUE),
+        maxFieldBytes = config.limits.longOr("max_field_bytes", Long.MAX_VALUE),
+        offlineWakeGranted = "offline.wake" in granted,
+    )
 
     // ------------------------------------------------- editor sync (SPEC 19)
 
@@ -3087,7 +3180,7 @@ class CompanionEngine(
             // surface. (R4: the old deep copy is gone — the immutable report
             // shares safely, and the suppressed variant is a `with` rebuild.)
             if ("capabilities" in granted || "triggers" in granted) {
-                var report = config.deviceReport
+                var report = deviceReport
                 if ("triggers" !in granted) {
                     val empty = JsonArray(emptyList())
                     report = report.with("trigger_caps", empty)
@@ -3171,6 +3264,11 @@ class CompanionEngine(
                 "max_editor_bytes exceeds max_frame_bytes - 4096"
             }
         }
+        val deviceCaps = jsonStringSet(deviceReport, "caps")
+        if ("shortcut.pin" in deviceCaps || "shortcuts.set" in deviceCaps)
+            floor("max_shortcut_icon_bytes", 1)
+        if ("shortcuts.set" in deviceCaps)
+            floor("max_shortcuts", 1)
         for (target in config.surfaceProfiles.keys) {
             val types = nodeTypesFromProfiles(config.surfaceProfiles, target) ?: continue
             val extensions = requireNotNull(
@@ -3254,7 +3352,7 @@ class CompanionEngine(
             "triggers" in config.supportedCapabilities
         val deviceBudget = if (emitsReport) l.longOr("max_device_report_bytes", 0) else 0L
         if (deviceBudget > 0)
-            require(wireSerialize(config.deviceReport).utf8Len() <= deviceBudget) {
+            require(wireSerialize(deviceReport).utf8Len() <= deviceBudget) {
                 "device report exceeds max_device_report_bytes"
             }
         val b = wireSerialize(prospective).utf8Len().toLong()
