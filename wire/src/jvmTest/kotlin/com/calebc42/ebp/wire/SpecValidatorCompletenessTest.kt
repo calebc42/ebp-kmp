@@ -62,6 +62,53 @@ class SpecValidatorCompletenessTest {
         accepts(node("column", "children" to wide))
     }
 
+    // ---------------------------------------- #187: the MenuItem obligations
+
+    @Test
+    fun menuItemsNeedAnActionAndOneTrailingSlot() {
+        fun item(vararg kv: Pair<String, JsonElement>) =
+            buildJsonObject { put("label", "Open"); put("on_tap", remote()); kv.forEach { put(it.first, it.second) } }
+
+        accepts(node("menu", "items" to buildJsonArray { add(item()) }))
+
+        // A row with no on_tap draws and then does nothing when tapped. SPEC
+        // 17.4 has required it since format 6; only the label was checked.
+        rejects(
+            node("menu", "items" to buildJsonArray {
+                add(buildJsonObject { put("label", "Inert") })
+            }),
+            "MenuItem needs an ActionDescriptor",
+        )
+        // One trailing slot, so the pair cannot both be drawn.
+        rejects(
+            node("menu", "items" to buildJsonArray {
+                add(item("trailing_icon" to JsonPrimitive("chevron_right"),
+                    "trailing_text" to JsonPrimitive("F11")))
+            }),
+            "mutually exclusive",
+        )
+        // Either alone is fine, including inside a group.
+        accepts(node("menu", "items" to buildJsonArray {
+            add(item("trailing_text" to JsonPrimitive("F11")))
+        }))
+        accepts(node("menu", "groups" to buildJsonArray {
+            add(buildJsonObject {
+                put("label", "Edit")
+                putJsonArray("items") { add(item("trailing_icon" to JsonPrimitive("chevron_right"))) }
+            })
+        }))
+        // The obligations reach into a group, not only the flat form.
+        rejects(
+            node("menu", "groups" to buildJsonArray {
+                add(buildJsonObject {
+                    put("label", "Edit")
+                    putJsonArray("items") { add(buildJsonObject { put("label", "Inert") }) }
+                })
+            }),
+            "MenuItem needs an ActionDescriptor",
+        )
+    }
+
     // ------------------------------------- LD-10: contract field-type checks
 
     @Test

@@ -1628,8 +1628,9 @@ object SpecValidator {
             "variant_host" -> validateVariantHost(node, path, ctx)
             "menu" -> {
                 // SPEC 17.4: a menu carries exactly one of items|groups. A
-                // MenuItem needs a label wherever it sits; a group is
-                // {label?, items} with a non-empty item array.
+                // MenuItem needs a label and an on_tap wherever it sits, and
+                // has ONE trailing slot; a group is {label?, items} with a
+                // non-empty item array.
                 val hasItems = "items" in node
                 val hasGroups = "groups" in node
                 if (hasItems == hasGroups)
@@ -1640,6 +1641,16 @@ object SpecValidator {
                             ?: throw ContentInvalid("$at[$i]", "must be a MenuItem object")
                         if (item.stringOrNull("label") == null)
                             throw ContentInvalid("$at[$i].label", "MenuItem label must be a string")
+                        // A row that cannot dispatch is a row that does
+                        // nothing when tapped; SPEC 17.4 has required this
+                        // since format 6, and only the label was checked.
+                        if (item["on_tap"] !is JsonObject)
+                            throw ContentInvalid("$at[$i].on_tap", "MenuItem needs an ActionDescriptor")
+                        if ("trailing_icon" in item && "trailing_text" in item)
+                            throw ContentInvalid(
+                                "$at[$i]",
+                                "trailing_icon and trailing_text are mutually exclusive",
+                            )
                     }
                 }
                 if (hasGroups) {
