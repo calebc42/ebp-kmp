@@ -1931,6 +1931,13 @@ object SpecValidator {
                     ownerId,
                 )
             }
+            ExtensionValueSchema.SwipeSideValue -> {
+                val side = value as? JsonObject ?: invalid("must be a swipe side")
+                // The side's trigger hook is keyed by its member name.
+                val sideKey = memberName?.takeIf { it == "swipe_start" || it == "swipe_end" }
+                    ?: invalid("only swipe_start or swipe_end may carry a swipe side")
+                validateSwipeSide(side, path, sideKey, ctx)
+            }
         }
     }
 

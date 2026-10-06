@@ -35,7 +35,7 @@ class ExtensionSchemaTest {
             "children" to ExtensionValueSchema.NodeArrayValue(1, 2),
             "on_tap" to ExtensionValueSchema.ActionDescriptorValue,
         ),
-        optional = emptyMap(),
+        optional = mapOf("swipe_end" to ExtensionValueSchema.SwipeSideValue),
     )
     private val row = NodeRow(typed.required.keys, typed.optional.keys)
 
@@ -62,7 +62,8 @@ class ExtensionSchemaTest {
         "tokens":{"primary":"green"},
         "child":{"t":"text","text":"one"},
         "children":[{"t":"text","text":"two"}],
-        "on_tap":{"action":"example.go"}
+        "on_tap":{"action":"example.go"},
+        "swipe_end":{"label":"Archive","on_trigger":{"action":"example.archive"}}
     }"""
 
     private fun validate(raw: String, advertisedTypes: Set<String>? = null) {
@@ -108,11 +109,45 @@ class ExtensionSchemaTest {
                 "\"on_tap\":{\"action\":\"example.go\"}",
                 "\"on_tap\":{\"action\":\"example.go\",\"builtin\":\"surface.open\"}",
             ) to "spec.on_tap",
+            validRaw.replace("\"label\":\"Archive\"", "\"label\":\"\"") to "spec.swipe_end.label",
+            validRaw.replace(
+                "{\"label\":\"Archive\",\"on_trigger\":{\"action\":\"example.archive\"}}",
+                "{\"actions\":[]}",
+            ) to "spec.swipe_end.actions",
+            validRaw.replace(
+                "{\"label\":\"Archive\",\"on_trigger\":{\"action\":\"example.archive\"}}",
+                "[]",
+            ) to "spec.swipe_end",
         )
         for ((raw, expectedPath) in cases) {
             val invalid = assertThrows(ContentInvalid::class.java) { validate(raw) }
             assertEquals(expectedPath, invalid.path)
         }
+    }
+
+    @Test
+    fun aSwipeSideSchemaBindsToTheSwipeMembersOnly() {
+        // The core walk accepts an object under an unknown-named member; the
+        // typed pass is what refuses a swipe side carried by any other name.
+        val sideways = ExtensionNodeSchema(
+            required = mapOf("sideways" to ExtensionValueSchema.SwipeSideValue),
+            optional = emptyMap(),
+        )
+        val withSideways = NodeVocabulary(
+            schema = NODE_SCHEMA + (nodeType to NodeRow(setOf("sideways"), emptySet())),
+            extensions = mapOf("example.typed" to setOf(nodeType)),
+            extensionSchemas = mapOf(nodeType to sideways),
+            extensionSemanticValidators = emptyMap(),
+        )
+        val invalid = assertThrows(ContentInvalid::class.java) {
+            SpecValidator.validateSurfaceSpec(
+                Json.parseToJsonElement(
+                    """{"t":"$nodeType","sideways":{"label":"Archive","on_trigger":{"action":"example.archive"}}}""",
+                ) as JsonObject,
+                nodeVocabulary = withSideways,
+            )
+        }
+        assertEquals("spec.sideways", invalid.path)
     }
 
     @Test

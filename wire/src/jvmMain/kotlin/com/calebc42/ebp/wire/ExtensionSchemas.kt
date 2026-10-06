@@ -113,6 +113,14 @@ sealed interface ExtensionValueSchema {
 
     /** One ordinary EBP ActionDescriptor. */
     data object ActionDescriptorValue : ExtensionValueSchema
+
+    /**
+     * One ordinary EBP swipe side (the `swipe_start`/`swipe_end` grammar).
+     * Its own validator remains authoritative and keys the side's trigger
+     * hook by the member name, so only a member of either name may carry
+     * this schema; the generator refuses it anywhere else.
+     */
+    data object SwipeSideValue : ExtensionValueSchema
 }
 
 /** Typed required and optional members for one renderer-owned node type. */
