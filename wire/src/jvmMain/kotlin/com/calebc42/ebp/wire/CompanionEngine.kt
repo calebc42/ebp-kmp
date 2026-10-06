@@ -1316,12 +1316,15 @@ class CompanionEngine(
      *
      * The `node-array` half is DERIVED, for the same reason [NODE_SLOT_MEMBERS]
      * is: a member the contract adds and this set forgets is a silently dead
-     * editor session. `items` cannot be derived — the contract types it
-     * `varies-per-node`, because a `tabs.items` entry is a TabItem label object
-     * and a `menu.items` entry is a menu item, neither of them a node. The
-     * `t`-guard in the walk below is what keeps those out. */
+     * editor session. `items` arrives through `reorderable_list.items`: since
+     * amendment #192 the contract types node-dependent members under
+     * `node.member` keys, so the bare member name is taken from each key. A
+     * `tabs.items` entry is a TabItem label object and a `menu.items` entry is
+     * a menu item, neither of them a node; the `t`-guard in the walk below is
+     * what keeps those out. */
     private val NODE_ARRAY_MEMBERS: Set<String> =
-        FIELD_TYPES.filterValues { it == "node-array" }.keys + "items"
+        FIELD_TYPES.filterValues { it == "node-array" }.keys
+            .mapTo(mutableSetOf()) { it.substringAfterLast('.') }
 
     /** SPEC 13.4/17: members whose value is a single child node — the
      * scaffold slots and the envelope/decoration slots.
@@ -1335,9 +1338,12 @@ class CompanionEngine(
      * field still accepted typing locally. A REPL in a bottom sheet looked
      * alive and sent nothing. Deriving costs one filter and makes the drift
      * impossible: `VocabularyDriftTest` already pins `FIELD_TYPES` to
-     * `ebp/contract.json`. */
+     * `ebp/contract.json`. Keys may be node-scoped (`scaffold.floating_toolbar_fab`,
+     * amendment #192); the walk matches bare member names, so the node prefix
+     * is dropped. */
     private val NODE_SLOT_MEMBERS: Set<String> =
-        FIELD_TYPES.filterValues { it == "node" }.keys +
+        FIELD_TYPES.filterValues { it == "node" }.keys
+            .mapTo(mutableSetOf()) { it.substringAfterLast('.') } +
             // `empty` is a SPEC 22 widget-surface member, not a NODE member, so
             // the contract's node field types do not carry it. This walk covers
             // widget specs too, so it is unioned in by hand rather than lost.

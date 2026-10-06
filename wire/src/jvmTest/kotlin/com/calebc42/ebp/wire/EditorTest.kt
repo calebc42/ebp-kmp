@@ -717,8 +717,11 @@ class EditorTest {
         // silently. No edit.open, no edit.delta, `editorText` nil forever,
         // while the field still typed locally. A REPL in a bottom sheet looked
         // alive and sent nothing. The set is derived from FIELD_TYPES now;
-        // this pins the behaviour the derivation exists for.
+        // this pins the behaviour the derivation exists for. Amendment #192
+        // keys node-dependent members `node.member`, so the walk — and this
+        // test — take the bare member name from each key.
         val slots = FIELD_TYPES.filterValues { it == "node" }.keys
+            .mapTo(mutableSetOf()) { it.substringAfterLast('.') }
         assertTrue("the contract must still type slots as `node`", slots.size >= 16)
         for (slot in slots) {
             val out = mutableListOf<JsonObject>()
