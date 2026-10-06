@@ -25,10 +25,18 @@ data class PersistedRecord(
     val surface: String,
     val revision: Long,
     val present: Boolean,
+    /** The materialized snapshot: what every reader presents (SPEC 13.8.3). */
     val spec: JsonObject?,
     val currentView: String?,
     val staleSpec: JsonObject? = null,
     val staleAfterSeconds: Long? = null,
+    /** Amendment #194: the authored tree, with its `bind` members, that a
+     * patch re-materializes. Absent in a record written before #194, which
+     * SPEC 3.3 treats as the prior format: it loads as the spec itself. */
+    val authoredSpec: JsonObject? = null,
+    /** Amendment #194: the surface data document; absent before #194 and
+     * for a session without `data.model`, which loads as the empty document. */
+    val data: JsonObject? = null,
 )
 
 /**
@@ -98,6 +106,8 @@ class FileSurfaceBacking(
                 staleAfterSeconds = if ("stale_after_s" in o) {
                     o.reqLong("stale_after_s")
                 } else null,
+                authoredSpec = o.objOrNull("authored_spec"),
+                data = o.objOrNull("data"),
             )
         } ?: emptyList()
         // Drafts come from the split file. Backward compat: a records file
@@ -139,6 +149,8 @@ class FileSurfaceBacking(
                 r.currentView?.let { put("current_view", it) }
                 r.staleSpec?.let { put("stale_spec", it) }
                 r.staleAfterSeconds?.let { put("stale_after_s", it) }
+                r.authoredSpec?.let { put("authored_spec", it) }
+                r.data?.let { put("data", it) }
             }
         })
         writeAtomic(file, buildJsonObject { put("records", arr) })

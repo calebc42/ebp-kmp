@@ -1039,6 +1039,7 @@ class CompanionEngine(
             return respondError(id, 1204, "Not legal in this session state", "session-state")
         when (method) {
             "surface.update" -> handleSurfaceUpdate(id, params)
+            "surface.data" -> handleSurfaceData(id, params)
             "surface.remove" -> handleSurfaceRemove(id, params)
             "queue.replay" -> handleQueueReplay(id)
             "dialog.show" -> handleDialogShow(id, params)
@@ -1284,6 +1285,13 @@ class CompanionEngine(
                 }
                 value
             } else null
+            // SPEC 13.8.1: the data document rides the complete snapshot.
+            val data = if ("data" in params) {
+                params.objOrNull("data") ?: return respondError(
+                    id, 1201, "Invalid content", "content-invalid",
+                    buildJsonObject { put("path", "data"); put("reason", "must be an object") },
+                )
+            } else null
             val result = surfaces.update(
                 surface, revision, spec,
                 params.objOrNull("stale_spec"),
@@ -1291,6 +1299,8 @@ class CompanionEngine(
                 params.arrOrNull("reset_input_ids"),
                 staleAfterSeconds = staleAfterSeconds,
                 offlineWakeGranted = "offline.wake" in granted,
+                data = data,
+                dataModelGranted = "data.model" in granted,
             )
             respondResult(id, buildJsonObject {
                 put("status", result.status)
@@ -1308,6 +1318,39 @@ class CompanionEngine(
             // SPEC 13.2: never claim `applied` before the snapshot and its
             // reconciled drafts are durable. SurfaceStore has restored the
             // prior in-memory state, so the request can be retried safely.
+            respondError(id, -32603, "Storage failed", "internal-error")
+        }
+    }
+
+    /** SPEC 13.8.4: patch a present surface's data document at a new revision. */
+    private fun handleSurfaceData(id: JsonElement, params: JsonObject) {
+        if ("data.model" !in granted)
+            return respondError(id, -32601, "Method not found", "method-not-found")
+        val surface = params.stringOrNull("surface")
+        val revision = surfaceRevision(params["revision"])
+        val ops = params.arrOrNull("ops")
+        if (surface == null || revision == null || ops == null)
+            return respondError(id, -32602, "Invalid params", "invalid-params")
+        if (!surfaces.isValidSurfaceId(surface))
+            return respondError(id, 1201, "Invalid content", "content-invalid",
+                buildJsonObject { put("reason", "surface-id") })
+        try {
+            val result = surfaces.patch(
+                surface, revision, ops,
+                offlineWakeGranted = "offline.wake" in granted,
+            )
+            respondResult(id, buildJsonObject {
+                put("status", result.status)
+                put("revision", result.revision)
+                put("present", result.present)
+            })
+            // The tree is unchanged, so no editor session moves; the
+            // re-materialized snapshot is published like any applied update.
+            if (result.status == "applied") surfaceListener?.invoke(surface)
+        } catch (e: ContentInvalid) {
+            respondError(id, 1201, "Invalid content", "content-invalid",
+                buildJsonObject { put("path", e.path); put("reason", e.reason) })
+        } catch (_: SurfacePersistenceFailed) {
             respondError(id, -32603, "Storage failed", "internal-error")
         }
     }

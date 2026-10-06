@@ -29,6 +29,14 @@ object WireLimits {
     // stops at 50 containers with no override, so a document nested to the
     // JSON limit is unemittable by a conforming Emacs endpoint.
     const val MAX_NODE_DEPTH = 20
+    // SPEC 4.5 (amendment #194): the surface data document, its pointers,
+    // the bindings of one snapshot and the operations of one patch.
+    const val MAX_DATA_OCTETS = 1_048_576
+    const val MAX_DATA_DEPTH = 32
+    const val MAX_POINTER_OCTETS = 512
+    const val MAX_POINTER_SEGMENTS = 32
+    const val MAX_BINDINGS_PER_SNAPSHOT = 10_000
+    const val MAX_DATA_OPS = 1_000
     // SPEC 4.5 (amendment #113): the header section a SENDER may rely on a
     // peer accepting. The 8,192 figure above is a receiver rejection
     // threshold, not a sender allowance.

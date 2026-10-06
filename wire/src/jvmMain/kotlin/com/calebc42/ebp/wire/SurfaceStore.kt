@@ -103,11 +103,22 @@ class SurfaceStore(
     private class Record(
         var revision: Long,
         var present: Boolean,
+        /** The materialized snapshot every reader presents (SPEC 13.8.3). */
         var spec: JsonObject?,
         var currentView: String?,
         var statefuls: Map<String, JsonObject>,
         var staleSpec: JsonObject?,
         var staleAfterSeconds: Long?,
+        /** SPEC 13.8: the authored tree a patch re-materializes, and the document. */
+        var authoredSpec: JsonObject?,
+        var data: JsonObject?,
+    )
+
+    /** What the namespace validators admitted for one snapshot. */
+    private class Admitted(
+        val statefuls: Map<String, JsonObject>,
+        val reset: Set<String>,
+        val isMultiView: Boolean,
     )
 
     private val records = LinkedHashMap<String, Record>()
@@ -136,14 +147,25 @@ class SurfaceStore(
             var currentView = r.currentView
             var staleSpec = r.staleSpec
             var staleAfterSeconds = r.staleAfterSeconds
+            // SPEC 3.3/13.8: a record from before amendment #194 carries
+            // neither member — its spec is its authored tree and its
+            // document is empty.
+            var authoredSpec = r.authoredSpec ?: r.spec
+            var data = r.data
             val statefuls = if (r.present && r.spec != null) {
                 // SPEC 13.4: the namespace decides the variant, on RELOAD too.
                 // Re-validating a notification spec ({body, meta?}) with the
                 // app-surface validator failed every time, so every present
                 // notification was dropped on every restart.
                 val revalidated = runCatching {
+                    // SPEC 13.8.3/13.1: re-materialize the authored tree
+                    // against the document before re-validating.
+                    if (data != null) {
+                        Materializer.checkDocument(data, "data")
+                        spec = Materializer.materialize(authoredSpec!!, data, "spec", nodeVocabulary)
+                    }
                     if (namespace(r.surface) == "notification") {
-                        SpecValidator.validateNotificationSpec(r.spec,
+                        SpecValidator.validateNotificationSpec(spec!!,
                             maxCaptureFields = maxCaptureFields,
                             advertisedTypes = notificationNodeTypes,
                             advertisedBuiltins = notificationBuiltins,
@@ -172,7 +194,7 @@ class SurfaceStore(
                         emptyMap()
                     } else if (namespace(r.surface) == "widget") {
                         SpecValidator.validateWidgetSpec(
-                            r.spec,
+                            spec!!,
                             advertisedTypes = widgetNodeTypes,
                             advertisedBuiltins = widgetBuiltins,
                             advertisedFeatures = widgetFeatures,
@@ -203,7 +225,7 @@ class SurfaceStore(
                         emptyMap()
                     } else if (namespace(r.surface) == "tile") {
                         SpecValidator.validateTileSpec(
-                            r.spec,
+                            spec!!,
                             advertisedBuiltins = tileBuiltins,
                             advertisedFeatures = tileFeatures,
                             offlineWakeGranted = offlineWakeConfigured,
@@ -220,7 +242,7 @@ class SurfaceStore(
                         emptyMap()
                     } else {
                         val admission = appAdmission()
-                        SpecValidator.validateSurfaceSpec(r.spec,
+                        SpecValidator.validateSurfaceSpec(spec!!,
                             maxCaptureFields = maxCaptureFields,
                             maxChartPoints = maxChartPoints, maxCanvasOps = maxCanvasOps,
                             maxRichSpans = maxRichSpans, maxTableCells = maxTableCells,
@@ -234,7 +256,7 @@ class SurfaceStore(
                                 r.staleSpec?.let { stale ->
                                     SpecValidator.validateStaleSpec(
                                         stale,
-                                        "views" in r.spec,
+                                        "views" in spec!!,
                                         maxCaptureFields,
                                         maxChartPoints,
                                         maxCanvasOps,
@@ -265,6 +287,8 @@ class SurfaceStore(
                     currentView = null
                     staleSpec = null
                     staleAfterSeconds = null
+                    authoredSpec = null
+                    data = null
                     emptyMap()
                 } else revalidated
             } else emptyMap()
@@ -276,9 +300,12 @@ class SurfaceStore(
                 statefuls,
                 staleSpec,
                 staleAfterSeconds,
+                authoredSpec,
+                data,
             )
             if (present != r.present || spec != r.spec || currentView != r.currentView ||
-                staleSpec != r.staleSpec || staleAfterSeconds != r.staleAfterSeconds)
+                staleSpec != r.staleSpec || staleAfterSeconds != r.staleAfterSeconds ||
+                authoredSpec != r.authoredSpec || data != r.data)
                 recordsDirty = true
         }
         // SPEC 10.2/13.6: a draft belongs to a stateful node of a PRESENT
@@ -322,6 +349,8 @@ class SurfaceStore(
                 r.currentView,
                 r.staleSpec,
                 r.staleAfterSeconds,
+                r.authoredSpec,
+                r.data,
             )
         }
 
@@ -384,6 +413,14 @@ class SurfaceStore(
     /** The accepted snapshot for a present surface, for rendering. */
     fun spec(surface: String): JsonObject? =
         records[surface]?.takeIf { it.present }?.spec
+
+    /** SPEC 13.8: the data document of a present surface; null without one. */
+    fun data(surface: String): JsonObject? =
+        records[surface]?.takeIf { it.present }?.data
+
+    /** SPEC 13.8: the authored tree (with `bind`) of a present surface. */
+    fun authoredSpec(surface: String): JsonObject? =
+        records[surface]?.takeIf { it.present }?.authoredSpec
 
     /** SPEC 14.4: the accepted revision the user is looking at. */
     fun revisionOf(surface: String): Long? =
@@ -464,13 +501,136 @@ class SurfaceStore(
 
     // ------------------------------------------------------ update (13.2)
 
-    fun update(surface: String, revision: Long, spec: JsonObject,
+    fun update(surface: String, revision: Long, authoredSpec: JsonObject,
                staleSpec: JsonObject?, currentView: String?,
                resetIds: JsonArray?,
                staleAfterSeconds: Long? = null,
-               offlineWakeGranted: Boolean = offlineWakeConfigured): SurfaceResult {
+               offlineWakeGranted: Boolean = offlineWakeConfigured,
+               data: JsonObject? = null,
+               dataModelGranted: Boolean = false): SurfaceResult {
         if (staleAfterSeconds != null && staleAfterSeconds <= 0)
             throw ContentInvalid("stale_after_s", "must be a positive integer")
+        // SPEC 13.8: bindings resolve before anything is validated; without
+        // the capability neither the document nor a binding is admitted.
+        val document: JsonObject?
+        val spec: JsonObject
+        if (!dataModelGranted) {
+            if (data != null) throw ContentInvalid("data", "requires the data.model capability")
+            Materializer.findBind(authoredSpec, "spec")?.let {
+                throw ContentInvalid(it, "bind requires the data.model capability")
+            }
+            document = null
+            spec = authoredSpec
+        } else {
+            document = data ?: JsonObject(emptyMap())
+            Materializer.checkDocument(document, "data")
+            spec = Materializer.materialize(authoredSpec, document, "spec", nodeVocabulary)
+        }
+        staleSpec?.let { stale ->
+            Materializer.findBind(stale, "stale_spec")?.let {
+                throw ContentInvalid(it, "stale_spec MUST NOT carry bind")
+            }
+        }
+        val admitted = admit(surface, spec, staleSpec, currentView, resetIds, offlineWakeGranted)
+        val statefuls = admitted.statefuls
+        val reset = admitted.reset
+        val isMultiView = admitted.isMultiView
+        val record = records[surface]
+        val floor = record?.revision ?: -1L
+        if (revision <= floor)
+            return SurfaceResult("stale", floor, record?.present ?: false)
+        // SPEC 13.1: limits gate anything that would grow a saturated count.
+        if (record == null) {
+            if (records.size.toLong() >= maxSurfaceIds)
+                throw ContentInvalid("surface", "surface-limit")
+            if (presentCount() >= maxSurfaces)
+                throw ContentInvalid("surface", "surface-limit")
+        } else if (!record.present && presentCount() >= maxSurfaces) {
+            // Reactivating a tombstone is invalid at max_surfaces.
+            throw ContentInvalid("surface", "surface-limit")
+        }
+        // SPEC 13.4: preserve the user's view unless it vanished, the
+        // surface is new, or the request names one.
+        val nextCurrentView = when {
+            !isMultiView -> null
+            currentView != null -> currentView
+            record?.present == true && record.currentView != null &&
+                record.currentView!! in spec.reqObj("views") -> record.currentView
+            else -> spec.reqString("initial_view")
+        }
+        val next = Record(
+            revision,
+            true,
+            spec,
+            nextCurrentView,
+            statefuls,
+            staleSpec,
+            staleAfterSeconds,
+            authoredSpec,
+            document,
+        )
+        return commitSnapshot(surface, record, next, reset)
+    }
+
+    /**
+     * SPEC 13.8.4: apply [ops] to a present surface's document at [revision]
+     * and re-materialize its authored tree. The whole request is validated
+     * first; the patch applies completely or not at all.
+     */
+    fun patch(surface: String, revision: Long, ops: JsonArray,
+              offlineWakeGranted: Boolean = offlineWakeConfigured): SurfaceResult {
+        val record = records[surface]
+        if (record == null || !record.present)
+            throw ContentInvalid("surface", "no present snapshot to patch")
+        if (ops.isEmpty()) throw ContentInvalid("ops", "must be a non-empty array")
+        if (ops.size > WireLimits.MAX_DATA_OPS) throw ContentInvalid("ops", "exceeds max_data_ops")
+        var document = record.data ?: JsonObject(emptyMap())
+        ops.forEachIndexed { i, op -> document = applyOp(document, op, "ops[$i]") }
+        Materializer.checkDocument(document, "data")
+        val authored = record.authoredSpec ?: record.spec!!
+        val spec = Materializer.materialize(authored, document, "spec", nodeVocabulary)
+        val admitted = admit(surface, spec, record.staleSpec, null, null, offlineWakeGranted)
+        if (revision <= record.revision)
+            return SurfaceResult("stale", record.revision, true)
+        val next = Record(
+            revision,
+            true,
+            spec,
+            record.currentView,
+            admitted.statefuls,
+            record.staleSpec,
+            record.staleAfterSeconds,
+            authored,
+            document,
+        )
+        return commitSnapshot(surface, record, next, emptySet())
+    }
+
+    /** One SPEC 13.8.4 DataOp applied to a copy of [document]. */
+    private fun applyOp(document: JsonObject, op: JsonElement, path: String): JsonObject {
+        val obj = op as? JsonObject ?: throw ContentInvalid(path, "DataOp must be an object")
+        val kind = obj.stringOrNull("op")
+        val allowed = when (kind) {
+            "set" -> setOf("op", "path", "value")
+            "remove" -> setOf("op", "path")
+            else -> throw ContentInvalid("$path.op", "must be set or remove")
+        }
+        obj.keys.firstOrNull { it !in allowed }?.let {
+            throw ContentInvalid("$path.$it", "unknown DataOp member")
+        }
+        val tokens = JsonPointer.parse(obj.stringOrNull("path"), "$path.path")
+        return if (kind == "set") {
+            val value = obj["value"] ?: throw ContentInvalid(path, "set requires value")
+            JsonPointer.set(document, tokens, value, "$path.path")
+        } else {
+            JsonPointer.remove(document, tokens, "$path.path")
+        }
+    }
+
+    /** SPEC 13.2/13.4: the namespace's validators, over the materialized [spec]. */
+    private fun admit(surface: String, spec: JsonObject, staleSpec: JsonObject?,
+                      currentView: String?, resetIds: JsonArray?,
+                      offlineWakeGranted: Boolean): Admitted {
         // SPEC 13.2: validate the entire request before changing state.
         // SPEC 13.4: the namespace decides the SurfaceSpec variant.
         val statefuls: Map<String, JsonObject>
@@ -595,29 +755,17 @@ class SurfaceStore(
                         "valid only for a multi-view app spec naming an existing view")
             }
         }
-        val record = records[surface]
-        val floor = record?.revision ?: -1L
-        if (revision <= floor)
-            return SurfaceResult("stale", floor, record?.present ?: false)
-        // SPEC 13.1: limits gate anything that would grow a saturated count.
-        if (record == null) {
-            if (records.size.toLong() >= maxSurfaceIds)
-                throw ContentInvalid("surface", "surface-limit")
-            if (presentCount() >= maxSurfaces)
-                throw ContentInvalid("surface", "surface-limit")
-        } else if (!record.present && presentCount() >= maxSurfaces) {
-            // Reactivating a tombstone is invalid at max_surfaces.
-            throw ContentInvalid("surface", "surface-limit")
-        }
-        // SPEC 13.4: preserve the user's view unless it vanished, the
-        // surface is new, or the request names one.
-        val nextCurrentView = when {
-            !isMultiView -> null
-            currentView != null -> currentView
-            record?.present == true && record.currentView != null &&
-                record.currentView!! in spec.reqObj("views") -> record.currentView
-            else -> spec.reqString("initial_view")
-        }
+        return Admitted(statefuls, reset, isMultiView)
+    }
+
+    /**
+     * SPEC 13.2/13.6/LD-2: install [next] over [record], reconcile drafts,
+     * commit durably (rolling back on failure) and stamp display epochs.
+     */
+    private fun commitSnapshot(surface: String, record: Record?, next: Record,
+                               reset: Set<String>): SurfaceResult {
+        val revision = next.revision
+        val statefuls = next.statefuls
         // SPEC 13.6: the pre-update node types decide draft compatibility.
         val oldStatefuls = record?.statefuls ?: emptyMap()
         // T3/LD-2: what the display is showing right now, before this
@@ -627,15 +775,6 @@ class SurfaceStore(
             .associateWith { currentValue(surface, it) }
         // Install a fresh candidate rather than mutating RECORD in place. It
         // remains the complete rollback value until the durable commit wins.
-        val next = Record(
-            revision,
-            true,
-            spec,
-            nextCurrentView,
-            statefuls,
-            staleSpec,
-            staleAfterSeconds,
-        )
         val wasRecordsDirty = recordsDirty
         records[surface] = next
         recordsDirty = true
@@ -681,6 +820,8 @@ class SurfaceStore(
             null,
             null,
             emptyMap(),
+            null,
+            null,
             null,
             null,
         )

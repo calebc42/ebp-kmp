@@ -155,6 +155,12 @@ class SpecLimitsTest {
             "max_method_bytes" to WireLimits.MAX_METHOD_OCTETS,
             "max_send_header_bytes" to WireLimits.MAX_SEND_HEADER_OCTETS,
             "max_node_depth" to WireLimits.MAX_NODE_DEPTH,
+            "max_data_bytes" to WireLimits.MAX_DATA_OCTETS,
+            "max_data_depth" to WireLimits.MAX_DATA_DEPTH,
+            "max_pointer_bytes" to WireLimits.MAX_POINTER_OCTETS,
+            "max_pointer_segments" to WireLimits.MAX_POINTER_SEGMENTS,
+            "max_bindings_per_snapshot" to WireLimits.MAX_BINDINGS_PER_SNAPSHOT,
+            "max_data_ops" to WireLimits.MAX_DATA_OPS,
         )
         assertEquals(fixed.keys.toSortedSet(), implemented.keys.toSortedSet())
         for ((key, value) in implemented)

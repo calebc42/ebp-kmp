@@ -1408,6 +1408,9 @@ object SpecValidator {
             if (!ctx.ids.add(id))
                 throw ContentInvalid("$path.id", "duplicate node ID")
         }
+        // SPEC 13.8.3: the Bind object's shape on every node that carries
+        // one; resolution happened in the engine before this walk.
+        if ("bind" in node) Materializer.checkBindShape(node, path)
         // SPEC 17.1: a type absent from the target profile is unsupported —
         // degrade like an unknown type (skip required members, per-type schema,
         // and stateful registration; the renderer renders its children only).

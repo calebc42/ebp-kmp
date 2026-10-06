@@ -132,7 +132,7 @@ const val SPEC_VERSION = "3.1.0-draft"
 
 val CORE_NODE_SET: Set<String> = setOf("text", "row", "column", "box", "spacer", "divider", "button", "text_input")
 
-val UNIVERSAL_NODE_ATTRIBUTES: Set<String> = setOf("key", "id", "scroll_here", "padding", "pad", "width", "height", "min_width", "max_width", "min_height", "max_height", "fill_fraction", "aspect_ratio", "weight", "bg", "corner", "border", "alpha", "clip", "align_self", "semantics")
+val UNIVERSAL_NODE_ATTRIBUTES: Set<String> = setOf("key", "id", "scroll_here", "padding", "pad", "width", "height", "min_width", "max_width", "min_height", "max_height", "fill_fraction", "aspect_ratio", "weight", "bg", "corner", "border", "alpha", "clip", "align_self", "semantics", "bind")
 
 const val MAX_SEMANTIC_ACTIONS_PER_NODE = 8
 const val MAX_WIDGET_NODES = 128
@@ -426,6 +426,7 @@ val FIELD_TYPES: Map<String, String> = mapOf(
     "avatar" to "identifier",
     "badge" to "string-or-number",
     "bg" to "color",
+    "bind" to "bind-object",
     "body" to "node",
     "border" to "border-object",
     "bottom_bar" to "node",

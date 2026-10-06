@@ -26,6 +26,8 @@ val METHOD_REGISTRY: Map<String, MethodSpec> = mapOf(
     "surface.remove" to MethodSpec(Sender.EMACS, true, SR),
     // SPEC 13.1 (#141): explicit floor retirement; the apply lands with RF-3+.
     "surface.release" to MethodSpec(Sender.EMACS, true, R),
+    // SPEC 13.8.4 (#194): a data patch is an ordinary revisioned mutation.
+    "surface.data" to MethodSpec(Sender.EMACS, true, SR),
     "queue.replay" to MethodSpec(Sender.EMACS, true, SR),
     "event.action" to MethodSpec(Sender.COMPANION, true, SR),
     "state.changed" to MethodSpec(Sender.COMPANION, false, R),
