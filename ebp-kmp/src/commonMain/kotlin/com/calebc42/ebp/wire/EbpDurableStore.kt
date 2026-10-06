@@ -90,18 +90,30 @@ data class DurableSurfaceRecord(
     val surfaceId: String,
     val revision: Long,
     val present: Boolean,
+    /** The materialized snapshot every reader presents (SPEC 13.8.3). */
     val spec: JsonObject?,
     val staleSpec: JsonObject? = null,
     val staleAfterSeconds: Long? = null,
     val currentView: String? = null,
     val acceptedAtMs: Long,
     val firstSeenOrdinal: Long,
+    /** SPEC 13.8 (amendment #194): the authored tree, with its `bind`
+     * members, that a data patch re-materializes. Null for a record written
+     * before the amendment — the prior format (SPEC 3.3) — which loads as
+     * the spec itself. */
+    val authoredSpec: JsonObject? = null,
+    /** SPEC 13.8: the surface data document; null before the amendment and
+     * for a session without `data.model`, which loads as the empty document. */
+    val data: JsonObject? = null,
 ) {
     init {
         require(surfaceId.isNotBlank())
         require(revision >= 0)
         require(acceptedAtMs >= 0)
         require(firstSeenOrdinal >= 1)
+        require(present || (authoredSpec == null && data == null)) {
+            "A tombstone cannot retain an authored tree or a data document"
+        }
         if (present) {
             requireNotNull(spec) { "a present surface requires its accepted spec" }
             require(staleAfterSeconds == null || staleAfterSeconds > 0)
