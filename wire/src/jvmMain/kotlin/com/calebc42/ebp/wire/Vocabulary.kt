@@ -341,7 +341,7 @@ val STATEFUL_NODE_TYPES: Set<String> = setOf(
     // `checked` is present — see the `editor` precedent.
     "button", "icon_button")
 
-val ACTION_HOOK_KEYS: Set<String> = setOf("on_tap", "on_change", "on_submit", "on_save", "on_enter", "on_pick", "on_reorder", "on_refresh", "on_sheet_change", "on_expand_change", "on_long_tap", "on_add_row", "on_add_col", "on_day_tap", "on_month_change", "on_point_tap", "on_trigger", "header_action")
+val ACTION_HOOK_KEYS: Set<String> = setOf("on_tap", "on_change", "on_submit", "on_save", "on_enter", "on_pick", "on_reorder", "on_refresh", "on_sheet_change", "on_expand_change", "on_long_tap", "on_add_row", "on_add_col", "on_day_tap", "on_month_change", "on_point_tap", "on_trigger", "on_search", "on_action", "header_action")
 
 val OFFLINE_POLICIES: Set<String> = setOf("drop", "queue", "wake")
 const val OFFLINE_DEFAULT = "drop"
@@ -457,6 +457,7 @@ val FIELD_TYPES: Map<String, String> = mapOf(
     "content_spacing" to "dp",
     "corner" to "number-or-corner-object",
     "date_button.value" to "yyyy-mm-dd",
+    "date_stamp.month" to "string",
     "day" to "integer-1-31",
     "day_styles" to "date-style-object",
     "detail" to "node",
