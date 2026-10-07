@@ -41,7 +41,7 @@ class DataGoldenReplayTest {
     @Test
     fun everyDataVectorReproduces() {
         val lines = vectors()
-        assertTrue("expected the full corpus, got ${lines.size}", lines.size >= 21)
+        assertTrue("expected the full corpus, got ${lines.size}", lines.size >= 38)
         for ((index, vector) in lines) {
             val expect = vector.reqObj("expect")
             val outcome = runCatching { materialize(vector.reqObj("spec"), vector.getValue("data")) }

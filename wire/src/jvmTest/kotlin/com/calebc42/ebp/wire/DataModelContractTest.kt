@@ -39,5 +39,23 @@ class DataModelContractTest {
         assertEquals(fixed.reqLong("max_pointer_segments"), WireLimits.MAX_POINTER_SEGMENTS.toLong())
         assertEquals(fixed.reqLong("max_bindings_per_snapshot"), WireLimits.MAX_BINDINGS_PER_SNAPSHOT.toLong())
         assertEquals(fixed.reqLong("max_data_ops"), WireLimits.MAX_DATA_OPS.toLong())
+        assertEquals(fixed.reqLong("max_template_items"), WireLimits.MAX_TEMPLATE_ITEMS.toLong())
+    }
+
+    @Test
+    fun templateRulesMatchTheContract() {
+        val template = contract.reqObj("data_model_schema").reqObj("template")
+        assertEquals("data.template", template.reqString("feature"))
+        assertEquals("max_template_items", template.reqString("max_items_limit"))
+        assertEquals(template.reqLong("max_nesting"), Materializer.MAX_TEMPLATE_NESTING.toLong())
+        assertEquals(template.reqArr("root_must_bind").map { it.asStringOrNull()!! }.toSet(),
+            Materializer.TEMPLATE_ROOT_MUST_BIND)
+        assertEquals(template.reqArr("root_forbidden_members").map { it.asStringOrNull()!! }.toSet(),
+            Materializer.TEMPLATE_ROOT_FORBIDDEN)
+        assertEquals(template.reqObj("forbidden_inside").reqArr("node_types").map { it.asStringOrNull()!! }.toSet(),
+            Materializer.TEMPLATE_FORBIDDEN_TYPES)
+        assertEquals("item", template.reqString("injection"))
+        assertEquals(listOf("item"),
+            contract.reqObj("actions").reqObj("scope_injections").reqArr("template_item").map { it.asStringOrNull() })
     }
 }

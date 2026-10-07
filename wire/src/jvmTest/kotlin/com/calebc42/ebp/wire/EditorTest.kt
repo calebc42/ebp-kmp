@@ -720,8 +720,10 @@ class EditorTest {
         // this pins the behaviour the derivation exists for. Amendment #192
         // keys node-dependent members `node.member`, so the walk — and this
         // test — take the bare member name from each key.
+        // SPEC 13.8.5: `template` is typed `node` but is expanded, never
+        // presented, and may not hold an editor — the one slot the walk skips.
         val slots = FIELD_TYPES.filterValues { it == "node" }.keys
-            .mapTo(mutableSetOf()) { it.substringAfterLast('.') }
+            .mapTo(mutableSetOf()) { it.substringAfterLast('.') } - "template"
         assertTrue("the contract must still type slots as `node`", slots.size >= 16)
         for (slot in slots) {
             val out = mutableListOf<JsonObject>()

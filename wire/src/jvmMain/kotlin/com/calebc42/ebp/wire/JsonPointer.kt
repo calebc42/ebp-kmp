@@ -6,7 +6,8 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 /**
- * SPEC 13.8.2: an absolute RFC 6901 JSON Pointer within the fixed limits.
+ * SPEC 13.8.2: an RFC 6901 JSON Pointer within the fixed limits — absolute
+ * outside a template item scope, absolute or relative inside one (13.8.5).
  *
  * Evaluation is one container step per reference token over the document
  * the caller holds: no I/O, no interpretation of a token or of the value it
@@ -18,21 +19,38 @@ object JsonPointer {
     private val INDEX = Regex("^(0|[1-9][0-9]*)$")
     private val BAD_ESCAPE = Regex("~(?![01])")
 
-    /** The reference tokens of [text], unescaped; the empty pointer is the empty list. */
-    fun parse(text: String?, path: String): List<String> {
+    /** A parsed pointer: resolved from the document when [absolute], else from the item scope's element. */
+    class Parsed(val absolute: Boolean, val tokens: List<String>)
+
+    /** The reference tokens of an absolute [text], unescaped; the empty pointer is the empty list. */
+    fun parse(text: String?, path: String): List<String> = parseScoped(text, path, inScope = false).tokens
+
+    /**
+     * SPEC 13.8.2/13.8.5: [text] parsed within the fixed limits. A pointer
+     * without a leading `/` — the empty pointer included — is relative, and
+     * admitted only [inScope]; the empty pointer outside a scope is the
+     * absolute root.
+     */
+    fun parseScoped(text: String?, path: String, inScope: Boolean): Parsed {
         if (text == null) throw ContentInvalid(path, "pointer must be a string")
         if (text.toByteArray(Charsets.UTF_8).size > WireLimits.MAX_POINTER_OCTETS)
             throw ContentInvalid(path, "pointer exceeds max_pointer_bytes")
-        if (text.isEmpty()) return emptyList()
-        if (!text.startsWith("/")) throw ContentInvalid(path, "pointer must be absolute")
-        val tokens = text.substring(1).split("/")
+        if (text.isEmpty()) return Parsed(absolute = !inScope, tokens = emptyList())
+        val absolute: Boolean
+        val body: String
+        when {
+            text.startsWith("/") -> { absolute = true; body = text.substring(1) }
+            inScope -> { absolute = false; body = text }
+            else -> throw ContentInvalid(path, "pointer must be absolute outside a template")
+        }
+        val tokens = body.split("/")
         if (tokens.size > WireLimits.MAX_POINTER_SEGMENTS)
             throw ContentInvalid(path, "pointer exceeds max_pointer_segments")
-        return tokens.map { token ->
+        return Parsed(absolute, tokens.map { token ->
             if (BAD_ESCAPE.containsMatchIn(token))
                 throw ContentInvalid(path, "invalid ~ escape in pointer")
             token.replace("~1", "/").replace("~0", "~")
-        }
+        })
     }
 
     /**

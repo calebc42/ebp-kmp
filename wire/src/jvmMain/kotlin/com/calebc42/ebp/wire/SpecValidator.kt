@@ -887,6 +887,12 @@ object SpecValidator {
                         // Explicitly checked above; future semantics members
                         // remain receiver-opaque.
                         key == "semantics" -> Unit
+                        // SPEC 13.8.5: the Materializer expanded the template
+                        // into `children`, which is walked as the ordinary
+                        // subtree it is; the authored template is not a node
+                        // position. A snapshot that reached here unexpanded
+                        // was rejected by SurfaceStore before validation.
+                        key == "template" -> Unit
                         known && key in ACTION_HOOK_KEYS -> {
                             // SPEC 17.1: an `on_*` member is an
                             // ActionDescriptor.

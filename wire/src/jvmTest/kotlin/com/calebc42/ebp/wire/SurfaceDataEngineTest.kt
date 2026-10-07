@@ -19,7 +19,7 @@ import org.junit.Test
 class SurfaceDataEngineTest {
     private fun profiles(): JsonObject = buildJsonObject {
         putJsonObject("app") {
-            put("node_types", JsonArray(listOf("text", "column", "text_input").map(::JsonPrimitive)))
+            put("node_types", JsonArray(listOf("text", "column", "text_input", "lazy_column", "row", "button").map(::JsonPrimitive)))
             put("builtins", JsonArray(emptyList()))
             put("features", JsonArray(emptyList()))
             put("extensions", JsonArray(emptyList()))
@@ -103,6 +103,41 @@ class SurfaceDataEngineTest {
             put("surface", "app:j"); put("revision", 3)
         }).reqObj("error")
         assertEquals(-32602L, params.reqLong("code"))
+    }
+
+    @Test
+    fun aHookInsideATemplateItemCarriesTheItemKey() {
+        val h = Harness(setOf("data.model"), listOf("data.model"))
+        val outline = json(
+            """{"t":"lazy_column","bind":{"children":"/rows"},"template":{"t":"row","bind":{"key":"id"},"children":[
+                {"t":"button","label":"Open","on_tap":{"action":"note.open","args":{"source":"outline"}}}]}}""")
+        val applied = h.send("s1", "surface.update", buildJsonObject {
+            put("surface", "app:o"); put("revision", 1); put("spec", outline)
+            put("data", json("""{"rows":[{"id":"n1"},{"id":"n2"}]}"""))
+        }).reqObj("result")
+        assertEquals("applied", applied.reqString("status"))
+        h.send("r1", "session.ready", JsonObject(emptyMap()))
+        assertEquals(SessionState.READY, h.engine.state)
+
+        val root = h.store.spec("app:o")!!
+        val rootPath = IdentityPath.child("", root, "")
+        val row = root.reqArr("children")[1] as JsonObject
+        val rowPath = IdentityPath.child(rootPath, row, "children[1]")
+        val button = row.reqArr("children")[0] as JsonObject
+        val buttonPath = IdentityPath.child(rowPath, button, "children[0]")
+        val descriptor = button.reqObj("on_tap")
+
+        h.engine.dispatchAction("app:o", descriptor, null, sourcePath = buttonPath)
+        val event = h.out.last()
+        assertEquals("event.action", event.reqString("method"))
+        assertEquals(buildJsonObject { put("source", "outline"); put("item", "n2") },
+            event.reqObj("params").reqObj("args"))
+
+        // Outside any item — or with no path at all — nothing is injected.
+        h.engine.dispatchAction("app:o", descriptor, null, sourcePath = rootPath)
+        assertEquals(buildJsonObject { put("source", "outline") }, h.out.last().reqObj("params").reqObj("args"))
+        h.engine.dispatchAction("app:o", descriptor, null)
+        assertEquals(buildJsonObject { put("source", "outline") }, h.out.last().reqObj("params").reqObj("args"))
     }
 
     @Test

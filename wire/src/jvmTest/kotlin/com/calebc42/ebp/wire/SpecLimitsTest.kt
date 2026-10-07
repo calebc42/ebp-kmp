@@ -161,6 +161,7 @@ class SpecLimitsTest {
             "max_pointer_segments" to WireLimits.MAX_POINTER_SEGMENTS,
             "max_bindings_per_snapshot" to WireLimits.MAX_BINDINGS_PER_SNAPSHOT,
             "max_data_ops" to WireLimits.MAX_DATA_OPS,
+            "max_template_items" to WireLimits.MAX_TEMPLATE_ITEMS,
         )
         assertEquals(fixed.keys.toSortedSet(), implemented.keys.toSortedSet())
         for ((key, value) in implemented)

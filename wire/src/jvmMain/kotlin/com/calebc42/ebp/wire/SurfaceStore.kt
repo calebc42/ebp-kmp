@@ -112,6 +112,8 @@ class SurfaceStore(
         /** SPEC 13.8: the authored tree a patch re-materializes, and the document. */
         var authoredSpec: JsonObject?,
         var data: JsonObject?,
+        /** SPEC 13.8.5: identity path of every expanded item root to its key; derived, never persisted. */
+        var itemKeys: Map<String, String> = emptyMap(),
     )
 
     /** What the namespace validators admitted for one snapshot. */
@@ -152,6 +154,7 @@ class SurfaceStore(
             // document is empty.
             var authoredSpec = r.authoredSpec ?: r.spec
             var data = r.data
+            var itemKeys: Map<String, String> = emptyMap()
             val statefuls = if (r.present && r.spec != null) {
                 // SPEC 13.4: the namespace decides the variant, on RELOAD too.
                 // Re-validating a notification spec ({body, meta?}) with the
@@ -162,7 +165,9 @@ class SurfaceStore(
                     // against the document before re-validating.
                     if (data != null) {
                         Materializer.checkDocument(data, "data")
-                        spec = Materializer.materialize(authoredSpec!!, data, "spec", nodeVocabulary)
+                        val materialized = Materializer.materializeWithItems(authoredSpec!!, data, "spec", nodeVocabulary)
+                        spec = materialized.spec
+                        itemKeys = materialized.itemKeys
                     }
                     if (namespace(r.surface) == "notification") {
                         SpecValidator.validateNotificationSpec(spec!!,
@@ -289,6 +294,7 @@ class SurfaceStore(
                     staleAfterSeconds = null
                     authoredSpec = null
                     data = null
+                    itemKeys = emptyMap()
                     emptyMap()
                 } else revalidated
             } else emptyMap()
@@ -302,6 +308,7 @@ class SurfaceStore(
                 staleAfterSeconds,
                 authoredSpec,
                 data,
+                itemKeys,
             )
             if (present != r.present || spec != r.spec || currentView != r.currentView ||
                 staleSpec != r.staleSpec || staleAfterSeconds != r.staleAfterSeconds ||
@@ -422,6 +429,25 @@ class SurfaceStore(
     fun authoredSpec(surface: String): JsonObject? =
         records[surface]?.takeIf { it.present }?.authoredSpec
 
+    /**
+     * SPEC 13.8.5/14.3: the key of the innermost template item containing the
+     * node at [sourcePath] (an [IdentityPath] the renderer reported), or null
+     * when the node sits in no expanded item.
+     */
+    fun itemKey(surface: String, sourcePath: String?): String? {
+        if (sourcePath == null) return null
+        val items = records[surface]?.takeIf { it.present }?.itemKeys ?: return null
+        var best: String? = null
+        var bestLength = -1
+        for ((root, key) in items) {
+            if ((sourcePath == root || sourcePath.startsWith("$root/")) && root.length > bestLength) {
+                best = key
+                bestLength = root.length
+            }
+        }
+        return best
+    }
+
     /** SPEC 14.4: the accepted revision the user is looking at. */
     fun revisionOf(surface: String): Long? =
         records[surface]?.takeIf { it.present }?.revision
@@ -499,6 +525,9 @@ class SurfaceStore(
 
     fun namespace(id: String): String = id.substringBefore(':')
 
+    /** SPEC 13.8.5: namespaces whose snapshots MUST NOT carry `template`. */
+    private val TEMPLATE_FREE_NAMESPACES = setOf("notification", "widget", "tile")
+
     // ------------------------------------------------------ update (13.2)
 
     fun update(surface: String, revision: Long, authoredSpec: JsonObject,
@@ -514,19 +543,34 @@ class SurfaceStore(
         // the capability neither the document nor a binding is admitted.
         val document: JsonObject?
         val spec: JsonObject
+        var itemKeys: Map<String, String> = emptyMap()
         if (!dataModelGranted) {
             if (data != null) throw ContentInvalid("data", "requires the data.model capability")
+            // The template is named before the bindings it carries.
+            Materializer.findMember(authoredSpec, "spec", "template")?.let {
+                throw ContentInvalid(it, "template requires the data.model capability")
+            }
             Materializer.findBind(authoredSpec, "spec")?.let {
                 throw ContentInvalid(it, "bind requires the data.model capability")
             }
             document = null
             spec = authoredSpec
         } else {
+            // SPEC 13.8.5: a template is admitted in app snapshots only.
+            if (namespace(surface) in TEMPLATE_FREE_NAMESPACES)
+                Materializer.findMember(authoredSpec, "spec", "template")?.let {
+                    throw ContentInvalid(it, "template is admitted in app snapshots only")
+                }
             document = data ?: JsonObject(emptyMap())
             Materializer.checkDocument(document, "data")
-            spec = Materializer.materialize(authoredSpec, document, "spec", nodeVocabulary)
+            val materialized = Materializer.materializeWithItems(authoredSpec, document, "spec", nodeVocabulary)
+            spec = materialized.spec
+            itemKeys = materialized.itemKeys
         }
         staleSpec?.let { stale ->
+            Materializer.findMember(stale, "stale_spec", "template")?.let {
+                throw ContentInvalid(it, "stale_spec MUST NOT carry template")
+            }
             Materializer.findBind(stale, "stale_spec")?.let {
                 throw ContentInvalid(it, "stale_spec MUST NOT carry bind")
             }
@@ -568,6 +612,7 @@ class SurfaceStore(
             staleAfterSeconds,
             authoredSpec,
             document,
+            itemKeys,
         )
         return commitSnapshot(surface, record, next, reset)
     }
@@ -588,7 +633,8 @@ class SurfaceStore(
         ops.forEachIndexed { i, op -> document = applyOp(document, op, "ops[$i]") }
         Materializer.checkDocument(document, "data")
         val authored = record.authoredSpec ?: record.spec!!
-        val spec = Materializer.materialize(authored, document, "spec", nodeVocabulary)
+        val materialized = Materializer.materializeWithItems(authored, document, "spec", nodeVocabulary)
+        val spec = materialized.spec
         val admitted = admit(surface, spec, record.staleSpec, null, null, offlineWakeGranted)
         if (revision <= record.revision)
             return SurfaceResult("stale", record.revision, true)
@@ -602,6 +648,7 @@ class SurfaceStore(
             record.staleAfterSeconds,
             authored,
             document,
+            materialized.itemKeys,
         )
         return commitSnapshot(surface, record, next, emptySet())
     }

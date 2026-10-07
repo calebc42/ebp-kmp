@@ -132,7 +132,7 @@ const val SPEC_VERSION = "3.1.0-draft"
 
 val CORE_NODE_SET: Set<String> = setOf("text", "row", "column", "box", "spacer", "divider", "button", "text_input")
 
-val UNIVERSAL_NODE_ATTRIBUTES: Set<String> = setOf("key", "id", "scroll_here", "padding", "pad", "width", "height", "min_width", "max_width", "min_height", "max_height", "fill_fraction", "aspect_ratio", "weight", "bg", "corner", "border", "alpha", "clip", "align_self", "semantics", "bind")
+val UNIVERSAL_NODE_ATTRIBUTES: Set<String> = setOf("key", "id", "scroll_here", "padding", "pad", "width", "height", "min_width", "max_width", "min_height", "max_height", "fill_fraction", "aspect_ratio", "weight", "bg", "corner", "border", "alpha", "clip", "align_self", "semantics", "bind", "template")
 
 const val MAX_SEMANTIC_ACTIONS_PER_NODE = 8
 const val MAX_WIDGET_NODES = 128
@@ -611,6 +611,7 @@ val FIELD_TYPES: Map<String, String> = mapOf(
     "tab_selector.items" to "tab-item-array",
     "tab_selector.selected" to "non-negative-integer",
     "tabs.items" to "tab-item-array",
+    "template" to "node",
     "text" to "string",
     "text_input.value" to "string",
     "thickness" to "dp",

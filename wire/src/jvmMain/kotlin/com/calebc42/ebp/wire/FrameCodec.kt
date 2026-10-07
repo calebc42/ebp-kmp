@@ -37,6 +37,8 @@ object WireLimits {
     const val MAX_POINTER_SEGMENTS = 32
     const val MAX_BINDINGS_PER_SNAPSHOT = 10_000
     const val MAX_DATA_OPS = 1_000
+    // SPEC 4.5 (amendment #195): elements expanded from one template.
+    const val MAX_TEMPLATE_ITEMS = 10_000
     // SPEC 4.5 (amendment #113): the header section a SENDER may rely on a
     // peer accepting. The 8,192 figure above is a receiver rejection
     // threshold, not a sender allowance.

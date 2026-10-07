@@ -683,6 +683,11 @@ class CompanionEngine(
                        * knows it. Required for a synchronized `editor`'s
                        * hooks so the §19 read-only rule can be enforced. */
                        sourceId: String? = null,
+                       /** SPEC 13.8.5/14.3: the [IdentityPath] of the node
+                       * whose hook fired, when the host renders a surface
+                       * that may hold templates; the engine injects `item`
+                       * from it. */
+                       sourcePath: String? = null,
                        callback: ((ActionAdmissionOutcome) -> Unit)? = null) =
         dispatchSurfaceAction(
             surface,
@@ -690,6 +695,7 @@ class CompanionEngine(
             hookValue,
             injected,
             sourceId,
+            sourcePath,
             null,
             emptySet(),
             callback,
@@ -716,6 +722,7 @@ class CompanionEngine(
         null,
         null,
         sourceId,
+        null,
         secretFields,
         secretIds,
         callback,
@@ -728,6 +735,7 @@ class CompanionEngine(
         hookValue: JsonElement?,
         injected: JsonObject?,
         sourceId: String?,
+        sourcePath: String?,
         secretFields: JsonObject?,
         secretIds: Set<String>,
         callback: ((ActionAdmissionOutcome) -> Unit)?,
@@ -797,6 +805,10 @@ class CompanionEngine(
             // authored. The null guard survives AS a guard — null means no
             // member, not a JsonNull write.
             if (hookValue != null) put("value", hookValue)
+            // SPEC 14.3 (amendment #195): a hook on a node inside a template
+            // item carries the innermost item's key; an authored `item` was
+            // rejected at accept time.
+            surfaces.itemKey(surface, sourcePath)?.let { put("item", it) }
             // SPEC 14.3: multi-member hooks (on_reorder from/to/order,
             // on_add_row/on_add_col index, swipe on_trigger direction) inject
             // their produced members; authored conflicts were rejected at
@@ -1390,7 +1402,13 @@ class CompanionEngine(
             // `empty` is a SPEC 22 widget-surface member, not a NODE member, so
             // the contract's node field types do not carry it. This walk covers
             // widget specs too, so it is unioned in by hand rather than lost.
-            "empty"
+            "empty" -
+            // SPEC 13.8.5: `template` is typed `node` but is never a presented
+            // position — the Materializer expands it into `children`, which
+            // this walk covers, and an editor inside a template is rejected
+            // at admission. Descending into the authored template would open
+            // a session for a node that is never rendered.
+            "template"
 
     // Per-surface synchronized editors: surface -> (identity -> document),
     // where identity is the SPEC 16.1 presentation identity (key else id).
@@ -2979,6 +2997,10 @@ class CompanionEngine(
             return respondError(id, 1401, "Too many dialogs", "overloaded")
         val statefuls: Map<String, JsonObject>
         try {
+            // SPEC 13.8.5: a dialog document has no data document to expand.
+            Materializer.findMember(spec, "spec", "template")?.let {
+                throw ContentInvalid(it, "template is not admitted in a dialog document")
+            }
             statefuls = SpecValidator.validateSurfaceSpec(
                 spec, maxCaptureFields = config.limits.longOr("max_capture_fields", 64),
                 maxChartPoints = config.limits.longOr("max_chart_points", Long.MAX_VALUE),
