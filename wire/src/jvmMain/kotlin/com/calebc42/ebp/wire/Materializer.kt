@@ -11,8 +11,9 @@ import kotlinx.serialization.json.JsonPrimitive
  * the Companion's renderer reports as `sourcePath` when a hook fires and the
  * engine keys SPEC 13.8.5 template items on. One segment per node: the
  * authored `key`, else the `id`, else the JSON position of the node under
- * its parent node (`children[2]`, `views.main`, `variants[0].content`, the
- * empty string for a document root), each with the type discriminator;
+ * its parent node (`children[2]`, `variants[0].content`, the empty string
+ * for a document root — every `views` entry is a document root of its own,
+ * as the renderer presents it), each with the type discriminator;
  * atoms are hex-encoded so identifiers containing `/` or `:` stay one
  * closed segment. Opaque members (`args`, `meta`, `value`) are never
  * positions. Pure and total.
@@ -171,8 +172,13 @@ object Materializer {
             is JsonObject -> if ("t" in value) walkNode(value, path, scope, depth, templateRoot, identityParent, position)
             else {
                 val out = LinkedHashMap<String, JsonElement>(value.size)
+                // SPEC 13.4: a multi-view spec's `views` entries are each
+                // presented as a document root, so their identity position
+                // is the root's, not `views.<name>`.
+                val viewTable = identityParent.isEmpty() && position == "views"
                 for ((key, child) in value)
-                    out[key] = walk(child, "$path.$key", scope, depth, false, identityParent, route(position, key))
+                    out[key] = walk(child, "$path.$key", scope, depth, false, identityParent,
+                        if (viewTable) "" else route(position, key))
                 JsonObject(out)
             }
             else -> value

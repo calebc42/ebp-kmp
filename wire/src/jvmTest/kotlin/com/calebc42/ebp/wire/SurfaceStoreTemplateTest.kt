@@ -103,6 +103,17 @@ class SurfaceStoreTemplateTest {
     }
 
     @Test
+    fun aViewRootIsADocumentRootForIdentity() {
+        val store = SurfaceStore(16, 1024)
+        val views = json("""{"initial_view":"main","views":{"main":$outline,"aside":{"t":"text","text":"x"}}}""")
+        store.update("app:o", 1, views, null, null, null, data = rows, dataModelGranted = true)
+        val main = store.spec("app:o")!!.reqObj("views").reqObj("main")
+        val rootPath = IdentityPath.child("", main, "")
+        val row = main.reqArr("children")[0] as JsonObject
+        assertEquals("n1", store.itemKey("app:o", IdentityPath.child(rootPath, row, "children[0]")))
+    }
+
+    @Test
     fun templatesRequireTheGrantAndAnAppSnapshot() {
         val store = SurfaceStore(16, 1024)
         val ungranted = assertThrows(ContentInvalid::class.java) {
