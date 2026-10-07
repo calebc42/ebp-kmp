@@ -81,6 +81,21 @@ class SurfaceDataEngineTest {
         assertEquals("Evening",
             (h.store.spec("app:j")!!.reqArr("children")[0] as JsonObject).reqString("text"))
 
+        // SPEC 13.8.4 (amendment #196): insert shifts the later elements.
+        val listed = h.send("s2", "surface.update", buildJsonObject {
+            put("surface", "app:l"); put("revision", 1)
+            put("spec", json("""{"t":"column","bind":{"children":"/rows"},"template":{"t":"text","bind":{"key":"","text":""}}}"""))
+            put("data", json("""{"rows":["a","c"]}"""))
+        }).reqObj("result")
+        assertEquals("applied", listed.reqString("status"))
+        val inserted = h.send("d0", "surface.data", buildJsonObject {
+            put("surface", "app:l"); put("revision", 2)
+            put("ops", Json.parseToJsonElement("""[{"op":"insert","path":"/rows/1","value":"b"}]"""))
+        }).reqObj("result")
+        assertEquals("applied", inserted.reqString("status"))
+        assertEquals(listOf("a", "b", "c"),
+            h.store.spec("app:l")!!.reqArr("children").map { (it as JsonObject).reqString("text") })
+
         // At or below the floor: stale, not an error.
         val stale = h.send("d2", "surface.data", buildJsonObject {
             put("surface", "app:j"); put("revision", 2)

@@ -8,6 +8,7 @@ import java.io.File
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DataModelContractTest {
@@ -40,6 +41,20 @@ class DataModelContractTest {
         assertEquals(fixed.reqLong("max_bindings_per_snapshot"), WireLimits.MAX_BINDINGS_PER_SNAPSHOT.toLong())
         assertEquals(fixed.reqLong("max_data_ops"), WireLimits.MAX_DATA_OPS.toLong())
         assertEquals(fixed.reqLong("max_template_items"), WireLimits.MAX_TEMPLATE_ITEMS.toLong())
+    }
+
+    @Test
+    fun dataOpKindsMatchTheContract() {
+        val ops = contract.reqObj("data_model_schema").reqObj("ops")
+        val kinds = ops.filterValues { it is JsonObject }
+        assertEquals(kinds.keys, DataOps.SHAPES.keys)
+        for ((kind, shape) in kinds) {
+            val row = shape as JsonObject
+            assertEquals(kind, (row.reqArr("required") + row.reqArr("optional"))
+                .map { it.asStringOrNull()!! }.toSet(), DataOps.SHAPES.getValue(kind))
+        }
+        assertEquals("data.insert", ops.reqString("insert_feature"))
+        assertTrue("data.insert" in contract.reqArr("features").map { it.asStringOrNull() })
     }
 
     @Test

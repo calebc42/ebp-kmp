@@ -146,6 +146,51 @@ object JsonPointer {
         }
     }
 
+    /**
+     * SPEC 13.8.4 `insert` (amendment #196): a copy of [document] with [value]
+     * inserted into the array [tokens]' parent names, before the index the
+     * final token names; an index equal to the length appends. The parent
+     * MUST be an array and the index MUST NOT exceed its length.
+     */
+    fun insert(document: JsonObject, tokens: List<String>, value: JsonElement, path: String): JsonObject {
+        if (tokens.isEmpty()) throw ContentInvalid(path, "insert requires an array element pointer")
+        return insertIn(document, tokens, 0, value, path) as JsonObject
+    }
+
+    private fun insertIn(
+        container: JsonElement,
+        tokens: List<String>,
+        depth: Int,
+        value: JsonElement,
+        path: String,
+    ): JsonElement {
+        val token = tokens[depth]
+        if (depth == tokens.lastIndex) {
+            val array = container as? JsonArray
+                ?: throw ContentInvalid(path, "insert requires an array parent")
+            val index = arrayIndex(token, path)
+                ?: throw ContentInvalid(path, "array index exceeds the length")
+            if (index > array.size) throw ContentInvalid(path, "array index exceeds the length")
+            return JsonArray(array.subList(0, index) + value + array.subList(index, array.size))
+        }
+        return when (container) {
+            is JsonObject -> {
+                val child = container[token]
+                    ?: throw ContentInvalid(path, "parent container does not exist")
+                JsonObject(container + (token to insertIn(child, tokens, depth + 1, value, path)))
+            }
+            is JsonArray -> {
+                val index = arrayIndex(token, path)
+                if (index == null || index >= container.size)
+                    throw ContentInvalid(path, "parent container does not exist")
+                JsonArray(container.mapIndexed { i, e ->
+                    if (i == index) insertIn(e, tokens, depth + 1, value, path) else e
+                })
+            }
+            else -> throw ContentInvalid(path, "parent container does not exist")
+        }
+    }
+
     /** SPEC 13.8.2: a decimal without leading zeros; `-` is not admitted against an array. */
     private fun arrayIndex(token: String, path: String): Int? {
         if (!INDEX.matches(token))

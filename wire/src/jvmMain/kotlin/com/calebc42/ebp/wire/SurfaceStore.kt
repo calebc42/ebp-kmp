@@ -630,7 +630,7 @@ class SurfaceStore(
         if (ops.isEmpty()) throw ContentInvalid("ops", "must be a non-empty array")
         if (ops.size > WireLimits.MAX_DATA_OPS) throw ContentInvalid("ops", "exceeds max_data_ops")
         var document = record.data ?: JsonObject(emptyMap())
-        ops.forEachIndexed { i, op -> document = applyOp(document, op, "ops[$i]") }
+        document = DataOps.applyAll(document, ops)
         Materializer.checkDocument(document, "data")
         val authored = record.authoredSpec ?: record.spec!!
         val materialized = Materializer.materializeWithItems(authored, document, "spec", nodeVocabulary)
@@ -651,27 +651,6 @@ class SurfaceStore(
             materialized.itemKeys,
         )
         return commitSnapshot(surface, record, next, emptySet())
-    }
-
-    /** One SPEC 13.8.4 DataOp applied to a copy of [document]. */
-    private fun applyOp(document: JsonObject, op: JsonElement, path: String): JsonObject {
-        val obj = op as? JsonObject ?: throw ContentInvalid(path, "DataOp must be an object")
-        val kind = obj.stringOrNull("op")
-        val allowed = when (kind) {
-            "set" -> setOf("op", "path", "value")
-            "remove" -> setOf("op", "path")
-            else -> throw ContentInvalid("$path.op", "must be set or remove")
-        }
-        obj.keys.firstOrNull { it !in allowed }?.let {
-            throw ContentInvalid("$path.$it", "unknown DataOp member")
-        }
-        val tokens = JsonPointer.parse(obj.stringOrNull("path"), "$path.path")
-        return if (kind == "set") {
-            val value = obj["value"] ?: throw ContentInvalid(path, "set requires value")
-            JsonPointer.set(document, tokens, value, "$path.path")
-        } else {
-            JsonPointer.remove(document, tokens, "$path.path")
-        }
     }
 
     /** SPEC 13.2/13.4: the namespace's validators, over the materialized [spec]. */
