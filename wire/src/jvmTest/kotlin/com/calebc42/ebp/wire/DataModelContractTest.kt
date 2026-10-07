@@ -58,6 +58,31 @@ class DataModelContractTest {
     }
 
     @Test
+    fun visibleRulesMatchTheContract() {
+        val visible = contract.reqObj("data_model_schema").reqObj("visible")
+        assertEquals("data.visible", visible.reqString("feature"))
+        assertTrue("data.visible" in contract.reqArr("features").map { it.asStringOrNull() })
+        assertEquals("visible_when", visible.reqString("attribute"))
+        assertTrue("visible_when" in contract.reqArr("universal_node_attributes").map { it.asStringOrNull() })
+        assertTrue("visible_when" in Materializer.UNBINDABLE_MEMBERS)
+        val ops = visible.reqObj("ops")
+        fun names(key: String) = ops.reqArr(key).map { it.asStringOrNull()!! }.toSet()
+        assertEquals(names("no_value"), Materializer.VISIBLE_OPS_NO_VALUE)
+        assertEquals(names("scalar_value"), Materializer.VISIBLE_OPS_SCALAR)
+        assertEquals(names("number_value"), Materializer.VISIBLE_OPS_NUMBER)
+        assertEquals(contract.reqObj("enums").reqArr("visible.op").map { it.asStringOrNull()!! }.toSet(),
+            Materializer.VISIBLE_OPS)
+        assertEquals(visible.reqObj("forbidden_inside").reqArr("node_types").map { it.asStringOrNull()!! }.toSet(),
+            Materializer.VISIBLE_FORBIDDEN_TYPES)
+        assertEquals("children", visible.reqString("placement"))
+        val fixed = contract.reqObj("limits").reqObj("fixed")
+        assertEquals(fixed.reqLong(visible.reqString("max_per_node_limit")),
+            WireLimits.MAX_VISIBLE_PREDICATES_PER_NODE.toLong())
+        assertEquals(fixed.reqLong(visible.reqString("max_per_snapshot_limit")),
+            WireLimits.MAX_VISIBLE_PREDICATES_PER_SNAPSHOT.toLong())
+    }
+
+    @Test
     fun templateRulesMatchTheContract() {
         val template = contract.reqObj("data_model_schema").reqObj("template")
         assertEquals("data.template", template.reqString("feature"))

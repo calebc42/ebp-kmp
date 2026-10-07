@@ -550,6 +550,9 @@ class SurfaceStore(
             Materializer.findMember(authoredSpec, "spec", "template")?.let {
                 throw ContentInvalid(it, "template requires the data.model capability")
             }
+            Materializer.findMember(authoredSpec, "spec", "visible_when")?.let {
+                throw ContentInvalid(it, "visible_when requires the data.model capability")
+            }
             Materializer.findBind(authoredSpec, "spec")?.let {
                 throw ContentInvalid(it, "bind requires the data.model capability")
             }
@@ -557,10 +560,15 @@ class SurfaceStore(
             spec = authoredSpec
         } else {
             // SPEC 13.8.5: a template is admitted in app snapshots only.
-            if (namespace(surface) in TEMPLATE_FREE_NAMESPACES)
+            if (namespace(surface) in TEMPLATE_FREE_NAMESPACES) {
                 Materializer.findMember(authoredSpec, "spec", "template")?.let {
                     throw ContentInvalid(it, "template is admitted in app snapshots only")
                 }
+                // SPEC 13.8.6: conditional nodes share the template's admission.
+                Materializer.findMember(authoredSpec, "spec", "visible_when")?.let {
+                    throw ContentInvalid(it, "visible_when is admitted in app snapshots only")
+                }
+            }
             document = data ?: JsonObject(emptyMap())
             Materializer.checkDocument(document, "data")
             val materialized = Materializer.materializeWithItems(authoredSpec, document, "spec", nodeVocabulary)
@@ -570,6 +578,9 @@ class SurfaceStore(
         staleSpec?.let { stale ->
             Materializer.findMember(stale, "stale_spec", "template")?.let {
                 throw ContentInvalid(it, "stale_spec MUST NOT carry template")
+            }
+            Materializer.findMember(stale, "stale_spec", "visible_when")?.let {
+                throw ContentInvalid(it, "stale_spec MUST NOT carry visible_when")
             }
             Materializer.findBind(stale, "stale_spec")?.let {
                 throw ContentInvalid(it, "stale_spec MUST NOT carry bind")

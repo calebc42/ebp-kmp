@@ -3022,6 +3022,12 @@ class CompanionEngine(
             Materializer.findMember(spec, "spec", "template")?.let {
                 throw ContentInvalid(it, "template is not admitted in a dialog document")
             }
+            // SPEC 13.8.5/13.8.6: a dialog document has no data document, so it
+            // carries neither a template nor a conditional node.
+            for (member in listOf("template", "visible_when"))
+                Materializer.findMember(spec, "spec", member)?.let {
+                    throw ContentInvalid(it, "a dialog document MUST NOT carry $member")
+                }
             statefuls = SpecValidator.validateSurfaceSpec(
                 spec, maxCaptureFields = config.limits.longOr("max_capture_fields", 64),
                 maxChartPoints = config.limits.longOr("max_chart_points", Long.MAX_VALUE),

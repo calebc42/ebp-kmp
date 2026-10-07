@@ -3,6 +3,7 @@ package com.calebc42.ebp.wire
 
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -66,7 +67,7 @@ object Materializer {
     /** `contract.json` `data_model_schema.unbindable_members` (DataModelContractTest pins it). */
     val UNBINDABLE_MEMBERS: Set<String> = setOf(
         "t", "id", "key", "children", "bind", "template", "args", "meta",
-        "semantics", "variants", "swipe_start", "swipe_end",
+        "semantics", "variants", "swipe_start", "swipe_end", "visible_when",
     )
 
     /** `contract.json` `data_model_schema.unbindable_tags`: types that may carry a Node or a descriptor. */
@@ -82,6 +83,75 @@ object Materializer {
     val TEMPLATE_ROOT_MUST_BIND: Set<String> = setOf("key")
     val TEMPLATE_ROOT_FORBIDDEN: Set<String> = setOf("key", "id")
     val TEMPLATE_FORBIDDEN_TYPES: Set<String> = setOf("editor", "variant_host")
+
+    // SPEC 13.8.6 (#198): conditional nodes. The three operator groups, the
+    // closed predicate object, and the list a conditional subtree may not
+    // contain — the template's list — are pinned to contract.json by
+    // DataModelContractTest.
+    val VISIBLE_OPS_NO_VALUE: Set<String> = setOf("present", "absent", "empty", "non_empty")
+    val VISIBLE_OPS_SCALAR: Set<String> = setOf("eq", "neq")
+    val VISIBLE_OPS_NUMBER: Set<String> = setOf("lt", "lte", "gt", "gte")
+    val VISIBLE_OPS: Set<String> = VISIBLE_OPS_NO_VALUE + VISIBLE_OPS_SCALAR + VISIBLE_OPS_NUMBER
+    val VISIBLE_FORBIDDEN_TYPES: Set<String> = TEMPLATE_FORBIDDEN_TYPES
+    private val PREDICATE_MEMBERS = setOf("path", "op", "value")
+
+    /** One parsed `visible_when` predicate (SPEC 13.8.6). */
+    class Predicate(val pointer: JsonPointer.Parsed, val op: String, val operand: JsonElement?)
+
+    /** SPEC 13.8.6: the JSON type an `eq`/`neq` operand must share with the reached value. */
+    private fun jsonType(value: JsonElement): String = when (value) {
+        is JsonNull -> "null"
+        is JsonObject -> "object"
+        is JsonArray -> "array"
+        is JsonPrimitive -> when {
+            value.isString -> "string"
+            value.content == "true" || value.content == "false" -> "boolean"
+            else -> "number"
+        }
+    }
+
+    private fun finiteNumber(value: JsonElement?): Double? {
+        val primitive = value as? JsonPrimitive ?: return null
+        if (primitive is JsonNull || primitive.isString) return null
+        return primitive.content.toDoubleOrNull()?.takeIf { it.isFinite() }
+    }
+
+    /** SPEC 13.8.6: total evaluation of one predicate against what its pointer
+     * reached; a pointer that reached nothing or a JSON null hands in null. */
+    fun holds(op: String, reachedElement: JsonElement?, operand: JsonElement?): Boolean {
+        val reached = reachedElement.takeUnless { it is JsonNull }
+        when (op) {
+            "present" -> return reached != null
+            "absent" -> return reached == null
+        }
+        if (reached == null) return false
+        return when (op) {
+            "empty" -> when (reached) {
+                is JsonNull -> false
+                is JsonObject -> reached.isEmpty()
+                is JsonArray -> reached.isEmpty()
+                is JsonPrimitive -> reached.isString && reached.content.isEmpty()
+            }
+            "non_empty" -> when (reached) {
+                is JsonNull -> false
+                is JsonObject -> reached.isNotEmpty()
+                is JsonArray -> reached.isNotEmpty()
+                is JsonPrimitive -> reached.isString && reached.content.isNotEmpty()
+            }
+            "eq" -> operand != null && jsonType(reached) == jsonType(operand) && jsonValueEquals(reached, operand)
+            "neq" -> !(operand != null && jsonType(reached) == jsonType(operand) && jsonValueEquals(reached, operand))
+            else -> {
+                val a = finiteNumber(reached) ?: return false
+                val b = finiteNumber(operand) ?: return false
+                when (op) {
+                    "lt" -> a < b
+                    "lte" -> a <= b
+                    "gt" -> a > b
+                    else -> a >= b
+                }
+            }
+        }
+    }
 
     // SPEC 16.1/17.1: node members the structural walk never enters; a
     // binding is never resolved beneath them either.
@@ -148,6 +218,7 @@ object Materializer {
 
     private class Walk(val data: JsonObject, val vocabulary: NodeVocabulary) {
         var bindings = 0
+        var predicates = 0
         val itemKeys = LinkedHashMap<String, String>()
 
         /**
@@ -165,11 +236,37 @@ object Materializer {
             templateRoot: Boolean,
             identityParent: String,
             position: String,
+            childrenArray: Boolean = false,
+            inChildren: Boolean = false,
         ): JsonElement = when (value) {
-            is JsonArray -> JsonArray(value.mapIndexed { i, child ->
+            is JsonArray -> if (!childrenArray) JsonArray(value.mapIndexed { i, child ->
                 walk(child, "$path[$i]", scope, depth, false, identityParent, "$position[$i]")
-            })
-            is JsonObject -> if ("t" in value) walkNode(value, path, scope, depth, templateRoot, identityParent, position)
+            }) else {
+                // SPEC 13.8.6: a children array evaluates its conditional
+                // elements before anything beneath them is resolved, and a
+                // conditional array is keyed throughout. Error paths use the
+                // authored index; identity positions count the materialized
+                // siblings, which is what the renderer will report.
+                fun conditional(v: JsonElement) = v is JsonObject && "t" in v && "visible_when" in v
+                if (value.any(::conditional))
+                    value.forEachIndexed { i, v ->
+                        if (!(v is JsonObject && "key" in v))
+                            throw ContentInvalid("$path[$i].key", "every sibling of a conditional node MUST carry key")
+                    }
+                val shown = ArrayList<JsonElement>(value.size)
+                value.forEachIndexed { i, v ->
+                    if (conditional(v)) {
+                        val node = v as JsonObject
+                        val parsed = checkVisibleShape(node, "$path[$i]", scope != null)
+                        checkConditionalSubtree(node, "$path[$i]")
+                        if (!visible(parsed, scope)) return@forEachIndexed
+                    }
+                    shown.add(walk(v, "$path[$i]", scope, depth, false, identityParent,
+                        "$position[${shown.size}]", inChildren = true))
+                }
+                JsonArray(shown)
+            }
+            is JsonObject -> if ("t" in value) walkNode(value, path, scope, depth, templateRoot, identityParent, position, inChildren)
             else {
                 val out = LinkedHashMap<String, JsonElement>(value.size)
                 // SPEC 13.4: a multi-view spec's `views` entries are each
@@ -194,7 +291,12 @@ object Materializer {
             templateRoot: Boolean,
             identityParent: String,
             position: String,
+            inChildren: Boolean = false,
         ): JsonObject {
+            // SPEC 13.8.6: admitted only on an element of a children array.
+            if ("visible_when" in node && !inChildren)
+                throw ContentInvalid("$path.visible_when",
+                    "visible_when is admitted only on an element of a children array")
             val templated = "template" in node
             // SPEC 13.8.5: the structural rules once, at the authored path;
             // copies and nested templates were covered by that scan.
@@ -215,8 +317,8 @@ object Materializer {
             val identity = IdentityPath.child(identityParent, JsonObject(headline), position)
             val out = LinkedHashMap<String, JsonElement>(node.size + resolved.size + 1)
             for ((key, child) in node) {
-                out[key] = if (key == "bind" || key == "template" || key in OPAQUE) child
-                else walk(child, "$path.$key", scope, depth, false, identity, key)
+                out[key] = if (key == "bind" || key == "template" || key == "visible_when" || key in OPAQUE) child
+                else walk(child, "$path.$key", scope, depth, false, identity, key, childrenArray = key == "children")
             }
             out.putAll(resolved)
             if (templateRoot && scope !== PROBE)
@@ -294,6 +396,9 @@ object Materializer {
                 throw ContentInvalid(path, "template scopes nest deeper than $MAX_TEMPLATE_NESTING")
             for (member in TEMPLATE_ROOT_FORBIDDEN) if (member in root)
                 throw ContentInvalid("$path.$member", "a template node MUST NOT author $member")
+            // SPEC 13.8.6: Emacs filters arrays; a template root is never conditional.
+            if ("visible_when" in root)
+                throw ContentInvalid("$path.visible_when", "a template node MUST NOT carry visible_when")
             for (member in TEMPLATE_ROOT_MUST_BIND)
                 if ((root["bind"] as? JsonObject)?.containsKey(member) != true)
                     throw ContentInvalid("$path.$member", "a template node MUST bind $member")
@@ -332,6 +437,78 @@ object Materializer {
                 }
                 else -> Unit
             }
+        }
+
+        /** SPEC 13.8.6: the closed predicate grammar at the authored path; the
+         * parsed predicates come back for evaluation. */
+        private fun checkVisibleShape(node: JsonObject, path: String, inScope: Boolean): List<Predicate> {
+            val vpath = "$path.visible_when"
+            val preds = node["visible_when"] as? JsonArray
+            if (preds == null || preds.isEmpty())
+                throw ContentInvalid(vpath, "visible_when must be a non-empty array of predicates")
+            if (preds.size > WireLimits.MAX_VISIBLE_PREDICATES_PER_NODE)
+                throw ContentInvalid(vpath, "exceeds max_visible_predicates_per_node")
+            return preds.mapIndexed { i, element ->
+                val ppath = "$vpath[$i]"
+                if (++predicates > WireLimits.MAX_VISIBLE_PREDICATES_PER_SNAPSHOT)
+                    throw ContentInvalid(ppath, "exceeds max_visible_predicates_per_snapshot")
+                val pred = element as? JsonObject ?: throw ContentInvalid(ppath, "a predicate must be an object")
+                for (member in pred.keys) if (member !in PREDICATE_MEMBERS)
+                    throw ContentInvalid("$ppath.$member", "unknown predicate member")
+                if ("path" !in pred) throw ContentInvalid("$ppath.path", "a predicate requires path")
+                val op = pred.stringOrNull("op")?.takeIf { it in VISIBLE_OPS }
+                    ?: throw ContentInvalid("$ppath.op", "unregistered predicate op")
+                val operand = pred["value"]
+                when (op) {
+                    in VISIBLE_OPS_NO_VALUE -> if ("value" in pred)
+                        throw ContentInvalid("$ppath.value", "$op takes no value")
+                    in VISIBLE_OPS_NUMBER -> if (finiteNumber(operand) == null)
+                        throw ContentInvalid("$ppath.value", "$op requires a finite number")
+                    else -> if (operand !is JsonPrimitive || operand is JsonNull)
+                        throw ContentInvalid("$ppath.value", "$op requires a string, number or boolean")
+                }
+                val pointer = JsonPointer.parseScoped(pred["path"]?.asStringOrNull(), "$ppath.path", inScope)
+                Predicate(pointer, op, operand)
+            }
+        }
+
+        /** SPEC 13.8.6: the conjunction over the Companion-held document. */
+        private fun visible(parsed: List<Predicate>, scope: JsonElement?): Boolean {
+            for (predicate in parsed) {
+                if (!predicate.pointer.absolute && scope === PROBE) continue // present-but-unknown
+                val base = if (predicate.pointer.absolute) data else scope!!
+                val reached = JsonPointer.resolve(base, predicate.pointer.tokens, "")
+                if (!holds(predicate.op, reached, predicate.operand)) return false
+            }
+            return true
+        }
+
+        /** SPEC 13.8.6: the closed list a conditional node and its subtree may
+         * not contain — a stateful node, an editor, a variant_host, an id —
+         * reported at the offending node or member. A capture_fields
+         * descriptor may stay: a hidden node never dispatches and the IDs it
+         * names live outside the subtree. */
+        private fun checkConditionalSubtree(node: JsonObject, path: String) {
+            fun scan(value: JsonElement, vpath: String) {
+                when (value) {
+                    is JsonArray -> value.forEachIndexed { i, child -> scan(child, "$vpath[$i]") }
+                    is JsonObject -> {
+                        val isNode = "t" in value
+                        if (isNode) {
+                            val type = value.stringOrNull("t")
+                            if (type != null && (type in VISIBLE_FORBIDDEN_TYPES || vocabulary.isStateful(type, value)))
+                                throw ContentInvalid(vpath, "$type is prohibited under a conditional node")
+                            if ("id" in value) throw ContentInvalid("$vpath.id", "id is prohibited under a conditional node")
+                        }
+                        for ((key, child) in value) {
+                            if (isNode && (key == "bind" || key in OPAQUE)) continue
+                            scan(child, "$vpath.$key")
+                        }
+                    }
+                    else -> Unit
+                }
+            }
+            scan(node, path)
         }
 
         private fun checkTemplateDescriptor(descriptor: JsonElement, path: String) {
