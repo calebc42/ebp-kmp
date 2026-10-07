@@ -437,6 +437,39 @@ class CompanionEngineTest {
         assertEquals(SessionState.CONNECTED, engine.state)
     }
 
+    // --------------------------------------- locale advice (20.1.2, #197)
+
+    @Test
+    fun localeAdviceIsMirroredAndEmittedOnlyOnChange() {
+        val out = mutableListOf<JsonObject>()
+        val engine = engine(out)
+        // Stored before authentication, never emitted there.
+        engine.localeChanged("de-DE", "h23", "Europe/Berlin")
+        assertEquals(0, out.size)
+        engine.feed(frame(hello()))
+        engine.feed(frame(auth()))
+        val mirror = out.last().reqObj("result").reqObj("locale")
+        assertEquals("de-DE", mirror.reqString("tag"))
+        assertEquals("h23", mirror.reqString("hour_cycle"))
+        assertEquals("Europe/Berlin", mirror.reqString("time_zone"))
+        val before = out.size
+        engine.localeChanged("de-DE", "h23", "Europe/Berlin")
+        assertEquals("an unchanged object is never re-sent", before, out.size)
+        engine.localeChanged("de-DE", "h12", "Europe/Berlin")
+        val note = out.last()
+        assertEquals(JsonPrimitive("locale.changed"), note["method"])
+        assertTrue("a notification carries no id", "id" !in note)
+        assertEquals("h12", note.reqObj("params").reqString("hour_cycle"))
+        assertEquals(3, note.reqObj("params").size)
+    }
+
+    @Test
+    fun welcomeOmitsLocaleWhileUnknown() {
+        val out = mutableListOf<JsonObject>()
+        authedEngine(out)
+        assertTrue("locale" !in out.last().reqObj("result"))
+    }
+
     // -------------------------------------------- registry drift guard --
 
     @Test

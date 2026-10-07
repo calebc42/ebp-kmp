@@ -2894,6 +2894,27 @@ class CompanionEngine(
     /** SPEC 20.1.1: the last-reported geometry, mirrored in the welcome. */
     private var windowGeom: JsonObject? = null
 
+    /** SPEC 20.1.2 (#197): the last-reported locale advice, mirrored in the
+     * welcome. Presentation advice the Companion reports and Emacs formats
+     * for; the Companion itself never formats a display string from it. */
+    private var localeAdvice: JsonObject? = null
+
+    /** SPEC 20.1.2: report the device's presentation locale — a BCP 47
+     * [tag], the [hourCycle] `h12` or `h23`, and an IANA [timeZone]. Stores
+     * always (the welcome mirror), emits only on a post-auth session, and
+     * never re-sends an unchanged object. */
+    fun localeChanged(tag: String, hourCycle: String, timeZone: String) {
+        val advice = buildJsonObject {
+            put("tag", tag)
+            put("hour_cycle", hourCycle)
+            put("time_zone", timeZone)
+        }
+        if (advice == localeAdvice) return
+        localeAdvice = advice
+        if (state == SessionState.READY || state == SessionState.SYNCING)
+            emit(notification("locale.changed", advice))
+    }
+
     private fun sizeClassOf(dp: Int, mediumAt: Int, expandedAt: Int): String =
         when {
             dp >= expandedAt -> "expanded"
@@ -3317,6 +3338,10 @@ class CompanionEngine(
             // SPEC 20.1.1: mirror the known geometry so the FIRST snapshot
             // can be authored for the right class; omitted when unknown.
             windowGeom?.let { put("window", it) }
+            // SPEC 20.1.2 (#197): mirror the known locale advice so the FIRST
+            // snapshot can be authored for the device's clock cycle and civil
+            // day; omitted while unknown.
+            localeAdvice?.let { put("locale", it) }
             // SPEC 10.2: input_state MUST be omitted when empty; device waits
             // for the capability/trigger modules.
             surfaces.inputState().takeIf { it.isNotEmpty() }

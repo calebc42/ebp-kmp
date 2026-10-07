@@ -265,6 +265,7 @@ val ENUMS: Map<String, Set<String>> = mapOf(
     "button.shape_role" to setOf("leading", "middle", "trailing", "top", "bottom"),
     "theme.layout_direction" to setOf("ltr", "rtl"),
     "window.size_class" to setOf("compact", "medium", "expanded"),
+    "locale.hour_cycle" to setOf("h12", "h23"),
     "snackbar.result" to setOf("dismissed", "action"),
 )
 
