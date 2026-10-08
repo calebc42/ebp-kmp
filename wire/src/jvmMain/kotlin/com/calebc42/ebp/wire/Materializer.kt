@@ -200,9 +200,19 @@ object Materializer {
             JsonPointer.parseScoped(pointer.asStringOrNull(), "$path.bind.$member", inScope = true)
     }
 
-    /** A copy of [spec] with every bound member resolved against [data] and every template expanded. */
-    fun materialize(spec: JsonObject, data: JsonObject, path: String, vocabulary: NodeVocabulary): JsonObject =
-        materializeWithItems(spec, data, path, vocabulary).spec
+    /**
+     * A copy of [spec] with every bound member resolved against [data] and
+     * every template expanded. When [previous] is the prior revision's
+     * materialized tree, every subtree of the result equal to one of
+     * [previous] is that instance (see [share]).
+     */
+    fun materialize(
+        spec: JsonObject,
+        data: JsonObject,
+        path: String,
+        vocabulary: NodeVocabulary,
+        previous: JsonObject? = null,
+    ): JsonObject = materializeWithItems(spec, data, path, vocabulary, previous).spec
 
     /** [materialize] plus the identity path of every expanded item root. */
     fun materializeWithItems(
@@ -210,10 +220,76 @@ object Materializer {
         data: JsonObject,
         path: String,
         vocabulary: NodeVocabulary,
+        previous: JsonObject? = null,
     ): Materialized {
         val walk = Walk(data, vocabulary)
         val out = walk.walk(spec, path, null, 0, false, "", "") as JsonObject
-        return Materialized(out, walk.itemKeys)
+        val shared = previous?.let { share(out, it) as JsonObject } ?: out
+        return Materialized(shared, walk.itemKeys)
+    }
+
+    /**
+     * Structural sharing across revisions: a tree structurally identical to
+     * [fresh] — same members in the same order, same elements, same values —
+     * in which every subtree equal to the one at the same place in
+     * [previous] is [previous]'s instance, so a reader that compares by
+     * reference (Compose under strong skipping) skips it in O(1). Objects
+     * align by member name and keep [previous] only when the keys sit in the
+     * same order; arrays align by `key` when every element of both arrays is
+     * an object with a unique string `key` (a template's expansion), else by
+     * index, and keep [previous] only when every element is its instance at
+     * the same index. Pure: nothing is mutated and no instance escapes that
+     * was not already in [fresh] or [previous].
+     */
+    fun share(fresh: JsonElement, previous: JsonElement?): JsonElement {
+        if (previous == null || fresh === previous) return fresh
+        return when (fresh) {
+            is JsonObject -> {
+                if (previous !is JsonObject) return fresh
+                var all = fresh.size == previous.size
+                val prevKeys = if (all) previous.keys.iterator() else null
+                val out = LinkedHashMap<String, JsonElement>(fresh.size)
+                for ((key, value) in fresh) {
+                    val before = previous[key]
+                    val s = share(value, before)
+                    if (all) all = s === before && prevKeys!!.next() == key
+                    out[key] = s
+                }
+                if (all) previous else JsonObject(out)
+            }
+            is JsonArray -> {
+                if (previous !is JsonArray) return fresh
+                val freshKeys = uniqueKeys(fresh)
+                val prevByKey = if (freshKeys != null) uniqueKeys(previous)?.let { keys ->
+                    HashMap<String, JsonElement>(keys.size * 2).also { map ->
+                        keys.forEachIndexed { i, k -> map[k] = previous[i] }
+                    }
+                } else null
+                var all = fresh.size == previous.size
+                val out = ArrayList<JsonElement>(fresh.size)
+                fresh.forEachIndexed { i, element ->
+                    val before = if (prevByKey != null) prevByKey[freshKeys!![i]] else previous.getOrNull(i)
+                    val s = share(element, before)
+                    if (all) all = s === previous[i]
+                    out.add(s)
+                }
+                if (all) previous else JsonArray(out)
+            }
+            is JsonPrimitive -> if (fresh == previous) previous else fresh
+        }
+    }
+
+    /** The `key` of every element of [array] when each is an object with a unique string `key`, else null. */
+    private fun uniqueKeys(array: JsonArray): List<String>? {
+        val keys = ArrayList<String>(array.size)
+        val seen = HashSet<String>(array.size * 2)
+        for (element in array) {
+            val key = ((element as? JsonObject)?.get("key") as? JsonPrimitive)
+                ?.takeIf { it.isString }?.content ?: return null
+            if (!seen.add(key)) return null
+            keys.add(key)
+        }
+        return keys
     }
 
     private class Walk(val data: JsonObject, val vocabulary: NodeVocabulary) {

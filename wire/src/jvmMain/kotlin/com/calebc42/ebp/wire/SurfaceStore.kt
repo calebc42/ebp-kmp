@@ -544,6 +544,9 @@ class SurfaceStore(
         val document: JsonObject?
         val spec: JsonObject
         var itemKeys: Map<String, String> = emptyMap()
+        // The prior revision's tree: every untouched subtree of this one is
+        // shared with it by reference (Materializer.share).
+        val prevSpec = records[surface]?.takeIf { it.present }?.spec
         if (!dataModelGranted) {
             if (data != null) throw ContentInvalid("data", "requires the data.model capability")
             // The template is named before the bindings it carries.
@@ -557,7 +560,7 @@ class SurfaceStore(
                 throw ContentInvalid(it, "bind requires the data.model capability")
             }
             document = null
-            spec = authoredSpec
+            spec = prevSpec?.let { Materializer.share(authoredSpec, it) as JsonObject } ?: authoredSpec
         } else {
             // SPEC 13.8.5: a template is admitted in app snapshots only.
             if (namespace(surface) in TEMPLATE_FREE_NAMESPACES) {
@@ -571,7 +574,8 @@ class SurfaceStore(
             }
             document = data ?: JsonObject(emptyMap())
             Materializer.checkDocument(document, "data")
-            val materialized = Materializer.materializeWithItems(authoredSpec, document, "spec", nodeVocabulary)
+            val materialized = Materializer.materializeWithItems(authoredSpec, document, "spec", nodeVocabulary,
+                previous = prevSpec)
             spec = materialized.spec
             itemKeys = materialized.itemKeys
         }
@@ -644,7 +648,8 @@ class SurfaceStore(
         document = DataOps.applyAll(document, ops)
         Materializer.checkDocument(document, "data")
         val authored = record.authoredSpec ?: record.spec!!
-        val materialized = Materializer.materializeWithItems(authored, document, "spec", nodeVocabulary)
+        val materialized = Materializer.materializeWithItems(authored, document, "spec", nodeVocabulary,
+            previous = record.spec)
         val spec = materialized.spec
         val admitted = admit(surface, spec, record.staleSpec, null, null, offlineWakeGranted)
         if (revision <= record.revision)
