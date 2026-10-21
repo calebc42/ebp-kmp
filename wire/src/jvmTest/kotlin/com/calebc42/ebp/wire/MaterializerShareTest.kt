@@ -123,8 +123,11 @@ class MaterializerShareTest {
         assertNotSame(children(before)[1], children(after)[1])
         assertSame(children(before)[2], children(after)[2])
         assertEquals(second, after)
-        // The authored tree stays the instance the request parsed.
-        assertSame(second, store.authoredSpec("app:p"))
+        // Nothing was resolved, so the record holds ONE tree for both roles —
+        // the shared instance, which it also stores once — rather than the
+        // parsed instance beside a structurally identical copy.
+        assertEquals(second, store.authoredSpec("app:p"))
+        assertSame(after, store.authoredSpec("app:p"))
     }
 
     @Test

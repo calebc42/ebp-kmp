@@ -69,12 +69,45 @@ interface AtomicSurfaceBacking : SurfaceBacking {
     fun replaceState(records: List<PersistedRecord>, drafts: List<PersistedDraft>)
 }
 
-class MemorySurfaceBacking : SurfaceBacking {
-    private var records = emptyList<PersistedRecord>()
+/**
+ * A backend that can commit ONE surface's history without rewriting the
+ * others. An accepted `surface.update`, `surface.data`, `surface.remove` or
+ * `view.switch` changes exactly one record, so a backend that keeps a row per
+ * surface writes that row alone and the cost of a mutation stops growing with
+ * the size of the catalog. [replaceRecords] and [replaceState] remain the
+ * whole-catalog paths: the restore-time repair, and the fallback the store
+ * takes once an earlier best-effort write has left the catalog dirty. Both
+ * methods are atomic and durable, and throw on failure, exactly as the
+ * whole-catalog replaces do.
+ */
+interface IncrementalSurfaceBacking : AtomicSurfaceBacking {
+    /** Durably write [record]'s history alone; every other surface's record
+     * stays exactly as it was. */
+    fun putRecord(record: PersistedRecord)
+
+    /** [putRecord] together with the complete reconciled [drafts], in one
+     * commit: a reader that sees the record's revision never sees a draft it
+     * cleared (SPEC 13.6). */
+    fun putRecordWithDrafts(record: PersistedRecord, drafts: List<PersistedDraft>)
+}
+
+class MemorySurfaceBacking : IncrementalSurfaceBacking {
+    private var records = LinkedHashMap<String, PersistedRecord>()
     private var drafts = emptyList<PersistedDraft>()
-    override fun load(): SurfaceState = SurfaceState(records, drafts)
-    override fun replaceRecords(records: List<PersistedRecord>) { this.records = records }
+    override fun load(): SurfaceState = SurfaceState(records.values.toList(), drafts)
+    override fun replaceRecords(records: List<PersistedRecord>) {
+        this.records = records.associateByTo(LinkedHashMap()) { it.surface }
+    }
     override fun replaceDrafts(drafts: List<PersistedDraft>) { this.drafts = drafts }
+    override fun replaceState(records: List<PersistedRecord>, drafts: List<PersistedDraft>) {
+        replaceRecords(records)
+        replaceDrafts(drafts)
+    }
+    override fun putRecord(record: PersistedRecord) { records[record.surface] = record }
+    override fun putRecordWithDrafts(record: PersistedRecord, drafts: List<PersistedDraft>) {
+        putRecord(record)
+        replaceDrafts(drafts)
+    }
 }
 
 /**

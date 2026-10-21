@@ -162,7 +162,18 @@ object Materializer {
     private val PROBE: JsonElement = JsonPrimitive("\u0000probe")
 
     /** A materialized snapshot and its SPEC 13.8.5 item roots: identity path to bound key. */
-    class Materialized(val spec: JsonObject, val itemKeys: Map<String, String>)
+    class Materialized(
+        val spec: JsonObject,
+        val itemKeys: Map<String, String>,
+        /** How many `bind` members the walk resolved (a template's `children` included). */
+        val bindings: Int = 0,
+        /** How many `visible_when` predicates the walk evaluated. */
+        val predicates: Int = 0,
+    ) {
+        /** Nothing was resolved, expanded or hidden: [spec] is structurally
+         * the authored tree, member for member. */
+        val unbound: Boolean get() = bindings == 0 && predicates == 0
+    }
 
     /** The path of the first node under [value] carrying the universal attribute [member], or null. */
     fun findMember(value: JsonElement?, path: String, member: String): String? = when (value) {
@@ -225,7 +236,7 @@ object Materializer {
         val walk = Walk(data, vocabulary)
         val out = walk.walk(spec, path, null, 0, false, "", "") as JsonObject
         val shared = previous?.let { share(out, it) as JsonObject } ?: out
-        return Materialized(shared, walk.itemKeys)
+        return Materialized(shared, walk.itemKeys, walk.bindings, walk.predicates)
     }
 
     /**

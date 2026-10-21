@@ -168,6 +168,9 @@ class SurfaceStore(
                         val materialized = Materializer.materializeWithItems(authoredSpec!!, data, "spec", nodeVocabulary)
                         spec = materialized.spec
                         itemKeys = materialized.itemKeys
+                        // Nothing resolved: one instance serves as both trees,
+                        // exactly as `update` holds it (persistedAuthoredSpec).
+                        if (materialized.unbound) authoredSpec = spec
                     }
                     if (namespace(r.surface) == "notification") {
                         SpecValidator.validateNotificationSpec(spec!!,
@@ -310,9 +313,16 @@ class SurfaceStore(
                 data,
                 itemKeys,
             )
+            // Dirty when what this store would persist differs from what it
+            // loaded. The authored tree compares by what it means — an absent
+            // member IS the spec (SPEC 3.3) — so a record holding one instance
+            // for both trees reloads clean, and so does one written before
+            // that with the same tree stored twice: its next mutation stores
+            // it once, no repair needed.
             if (present != r.present || spec != r.spec || currentView != r.currentView ||
                 staleSpec != r.staleSpec || staleAfterSeconds != r.staleAfterSeconds ||
-                authoredSpec != r.authoredSpec || data != r.data)
+                (persistedAuthoredSpec(authoredSpec, spec) ?: spec) != (r.authoredSpec ?: r.spec) ||
+                data != r.data)
                 recordsDirty = true
         }
         // SPEC 10.2/13.6: a draft belongs to a stateful node of a PRESENT
@@ -344,22 +354,48 @@ class SurfaceStore(
             false
         }
 
-    private fun persistRecords() { tryPersistRecords() }
+    /** Best-effort persistence of [surface]'s record alone when the backing
+     * can write one row and nothing else is dirty; otherwise the whole
+     * catalog, which also repairs whatever an earlier write left behind.
+     * [wasDirty] is the dirty state BEFORE this mutation marked it. */
+    private fun tryPersistRecord(surface: String, wasDirty: Boolean): Boolean {
+        val incremental = backing as? IncrementalSurfaceBacking
+        if (incremental == null || wasDirty) return tryPersistRecords()
+        return try {
+            incremental.putRecord(persistedRecord(surface, records.getValue(surface)))
+            recordsDirty = false
+            true
+        } catch (_: Exception) {
+            recordsDirty = true
+            false
+        }
+    }
 
     private fun persistedRecords(): List<PersistedRecord> =
-        records.map { (surface, r) ->
-            PersistedRecord(
-                surface,
-                r.revision,
-                r.present,
-                r.spec,
-                r.currentView,
-                r.staleSpec,
-                r.staleAfterSeconds,
-                r.authoredSpec,
-                r.data,
-            )
-        }
+        records.map { (surface, r) -> persistedRecord(surface, r) }
+
+    private fun persistedRecord(surface: String, r: Record): PersistedRecord =
+        PersistedRecord(
+            surface,
+            r.revision,
+            r.present,
+            r.spec,
+            r.currentView,
+            r.staleSpec,
+            r.staleAfterSeconds,
+            persistedAuthoredSpec(r.authoredSpec, r.spec),
+            r.data,
+        )
+
+    /** The authored tree as the record stores it. A snapshot in which nothing
+     * was bound, expanded or hidden — every push without `data.model`, and
+     * the ordinary documentless push under it — has an authored tree that IS
+     * its materialized one, and the record holds that single instance for
+     * both roles. Storing it once halves the bytes every such push writes;
+     * the absent member is the documented pre-#194 shape, which loads as the
+     * spec itself (SPEC 3.3). A record whose two trees differ stores both. */
+    private fun persistedAuthoredSpec(authoredSpec: JsonObject?, spec: JsonObject?): JsonObject? =
+        authoredSpec?.takeUnless { it === spec }
 
     private fun persistDrafts() {
         runCatching {
@@ -378,12 +414,34 @@ class SurfaceStore(
      * draft replace, compensate with the preceding draft snapshot before
      * reporting failure; the caller restores the in-memory candidate.
      *
-     * Empty [removedDrafts] is the ordinary refresh hot path: one record-file
-     * replace and no draft serialization or fsync.
+     * Empty [removedDrafts] is the ordinary refresh hot path: one record
+     * write and no draft serialization or fsync.
+     *
+     * [surface] is the one record this mutation changed. An
+     * [IncrementalSurfaceBacking] receives that record alone — the catalog's
+     * other rows are untouched, so a patch to one screen no longer re-encodes
+     * every present surface — unless an earlier best-effort write left the
+     * catalog dirty ([wasRecordsDirty]), in which case the whole replace
+     * below repairs it as before.
      */
-    private fun persistSurfaceMutation(removedDrafts: List<PersistedDraft>) {
+    private fun persistSurfaceMutation(surface: String, removedDrafts: List<PersistedDraft>,
+                                       wasRecordsDirty: Boolean) {
         val nextDrafts = removedDrafts.takeIf { it.isNotEmpty() }?.let {
             persistedDrafts()
+        }
+        val incremental = backing as? IncrementalSurfaceBacking
+        if (incremental != null && !wasRecordsDirty) {
+            try {
+                val record = persistedRecord(surface, records.getValue(surface))
+                if (nextDrafts != null) incremental.putRecordWithDrafts(record, nextDrafts)
+                else incremental.putRecord(record)
+                recordsDirty = false
+            } catch (failure: Exception) {
+                // One atomic write: nothing durable changed. The caller
+                // restores the in-memory candidate and the prior dirty state.
+                throw SurfacePersistenceFailed(failure)
+            }
+            return
         }
         var draftsReplaced = false
         try {
@@ -463,9 +521,12 @@ class SurfaceStore(
         val r = records[surface]?.takeIf { it.present } ?: return false
         val views = r.spec?.objOrNull("views") ?: return false
         if (view !in views) return false
+        val wasRecordsDirty = recordsDirty
         r.currentView = view
         recordsDirty = true
-        persistRecords() // view choice is record state, no draft touched
+        // View choice is record state, no draft touched — and one record's
+        // state: the Back gesture must not rewrite the whole catalog.
+        tryPersistRecord(surface, wasRecordsDirty)
         return true
     }
 
@@ -544,6 +605,10 @@ class SurfaceStore(
         val document: JsonObject?
         val spec: JsonObject
         var itemKeys: Map<String, String> = emptyMap()
+        // Whether materialization left the tree member-for-member the
+        // authored one: no binding, template or conditional. Such a record
+        // holds one instance for both trees and stores it once.
+        var unbound = false
         // The prior revision's tree: every untouched subtree of this one is
         // shared with it by reference (Materializer.share).
         val prevSpec = records[surface]?.takeIf { it.present }?.spec
@@ -561,6 +626,7 @@ class SurfaceStore(
             }
             document = null
             spec = prevSpec?.let { Materializer.share(authoredSpec, it) as JsonObject } ?: authoredSpec
+            unbound = true
         } else {
             // SPEC 13.8.5: a template is admitted in app snapshots only.
             if (namespace(surface) in TEMPLATE_FREE_NAMESPACES) {
@@ -578,6 +644,7 @@ class SurfaceStore(
                 previous = prevSpec)
             spec = materialized.spec
             itemKeys = materialized.itemKeys
+            unbound = materialized.unbound
         }
         staleSpec?.let { stale ->
             Materializer.findMember(stale, "stale_spec", "template")?.let {
@@ -625,7 +692,11 @@ class SurfaceStore(
             statefuls,
             staleSpec,
             staleAfterSeconds,
-            authoredSpec,
+            // A tree with no binding, template or conditional — every push
+            // without `data.model`, and the ordinary documentless push with it
+            // — materializes to itself: hold the single shared instance, which
+            // the record then stores once (persistedAuthoredSpec).
+            if (unbound) spec else authoredSpec,
             document,
             itemKeys,
         )
@@ -832,9 +903,9 @@ class SurfaceStore(
         }.keys
         try {
             // Most surface refreshes (including Org visibility) remove no
-            // input draft. persistSurfaceMutation keeps those on the one-file
+            // input draft. persistSurfaceMutation keeps those on the
             // record-only path.
-            persistSurfaceMutation(removedDrafts)
+            persistSurfaceMutation(surface, removedDrafts, wasRecordsDirty)
         } catch (failure: SurfacePersistenceFailed) {
             if (record == null) records.remove(surface) else records[surface] = record
             removedDrafts.forEach { d -> drafts[d.surface to d.id] = d.value }
@@ -876,7 +947,7 @@ class SurfaceStore(
         }
         removedDrafts.forEach { drafts.remove(it.surface to it.id) }
         try {
-            persistSurfaceMutation(removedDrafts)
+            persistSurfaceMutation(surface, removedDrafts, wasRecordsDirty)
         } catch (failure: SurfacePersistenceFailed) {
             if (record == null) records.remove(surface) else records[surface] = record
             removedDrafts.forEach { d -> drafts[d.surface to d.id] = d.value }

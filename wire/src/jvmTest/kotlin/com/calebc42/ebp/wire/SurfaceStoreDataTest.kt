@@ -37,6 +37,67 @@ class SurfaceStoreDataTest {
         spec!!.reqArr("children")[0].let { (it as JsonObject).reqString("text") }
 
     @Test
+    fun aTreeWithoutBindingsIsStoredOnceAndReloadsClean() {
+        class RecordingBacking : IncrementalSurfaceBacking {
+            var state = SurfaceState(emptyList(), emptyList())
+            var wholeWrites = 0
+            val puts = mutableListOf<PersistedRecord>()
+            override fun load() = state
+            override fun replaceRecords(records: List<PersistedRecord>) {
+                wholeWrites++
+                state = state.copy(records = records)
+            }
+            override fun replaceDrafts(drafts: List<PersistedDraft>) {
+                state = state.copy(drafts = drafts)
+            }
+            override fun replaceState(records: List<PersistedRecord>, drafts: List<PersistedDraft>) {
+                replaceRecords(records)
+                replaceDrafts(drafts)
+            }
+            override fun putRecord(record: PersistedRecord) {
+                puts += record
+                state = state.copy(records = state.records.filter { it.surface != record.surface } + record)
+            }
+            override fun putRecordWithDrafts(record: PersistedRecord, drafts: List<PersistedDraft>) {
+                putRecord(record)
+                replaceDrafts(drafts)
+            }
+        }
+        val backing = RecordingBacking()
+        val store = SurfaceStore(16, 1024, backing = backing)
+        val literal = json("""{"t":"text","text":"literal"}""")
+        // The ordinary documentless push under the capability: nothing to
+        // resolve, so the record holds its one tree once.
+        store.update("app:p", 1, literal, null, null, null, dataModelGranted = true)
+        assertNull("an unbound tree is stored once", backing.puts.single().authoredSpec)
+        assertEquals(literal, backing.puts.single().spec)
+        // Without the capability likewise.
+        store.update("app:q", 1, literal, null, null, null, dataModelGranted = false)
+        assertNull(backing.puts.last().authoredSpec)
+        // A bound tree stores both.
+        store.update("app:j", 1, journal, null, null, null, data = document, dataModelGranted = true)
+        assertEquals(journal, backing.puts.last().authoredSpec)
+        assertEquals("Morning", textOf(backing.puts.last().spec))
+
+        // Reloaded, the stored shape is exactly what this store would persist:
+        // nothing is dirty, and the next mutation is still one record.
+        val restored = SurfaceStore(16, 1024, backing = backing)
+        assertEquals(literal, restored.authoredSpec("app:p"))
+        assertEquals(literal, restored.spec("app:p"))
+        assertEquals(journal, restored.authoredSpec("app:j"))
+        val before = backing.puts.size
+        restored.update("app:p", 2, json("""{"t":"text","text":"again"}"""), null, null, null,
+            dataModelGranted = true)
+        assertEquals(before + 1, backing.puts.size)
+        assertEquals(0, backing.wholeWrites)
+        // A patch re-materializes the unbound tree it holds, unchanged.
+        assertEquals("applied",
+            restored.patch("app:p", 3, ops("""[{"op":"set","path":"/x","value":1}]""")).status)
+        assertEquals("again", restored.spec("app:p")!!.reqString("text"))
+        assertEquals(json("""{"x":1}"""), restored.data("app:p"))
+    }
+
+    @Test
     fun snapshotsMaterializeAndPatchesReMaterializeAtANewRevision() {
         val store = SurfaceStore(16, 1024)
         val applied = store.update("app:j", 1, journal, null, null, null,

@@ -62,6 +62,132 @@ class SurfaceStoreTest {
                        resetIds: JsonArray? = null): SurfaceResult =
         s.update(surface, rev, spec, null, null, resetIds)
 
+    /** A backing that can write one record: what the Room backing is. */
+    private class IncrementalCountingBacking : IncrementalSurfaceBacking {
+        var state = SurfaceState(emptyList(), emptyList())
+        val puts = mutableListOf<PersistedRecord>()
+        val putsWithDrafts = mutableListOf<Pair<PersistedRecord, List<PersistedDraft>>>()
+        var wholeWrites = 0
+        var draftWrites = 0
+        var failNextPut = false
+        override fun load() = state
+        override fun replaceRecords(records: List<PersistedRecord>) {
+            wholeWrites++
+            state = state.copy(records = records)
+        }
+        override fun replaceDrafts(drafts: List<PersistedDraft>) {
+            draftWrites++
+            state = state.copy(drafts = drafts)
+        }
+        override fun replaceState(records: List<PersistedRecord>, drafts: List<PersistedDraft>) {
+            replaceRecords(records)
+            replaceDrafts(drafts)
+        }
+        override fun putRecord(record: PersistedRecord) {
+            if (failNextPut) {
+                failNextPut = false
+                throw java.io.IOException("synthetic record failure")
+            }
+            puts += record
+            state = state.copy(records = state.records.filter { it.surface != record.surface } + record)
+        }
+        override fun putRecordWithDrafts(record: PersistedRecord, drafts: List<PersistedDraft>) {
+            putsWithDrafts += record to drafts
+            state = state.copy(
+                records = state.records.filter { it.surface != record.surface } + record,
+                drafts = drafts,
+            )
+        }
+    }
+
+    private fun multiViewSpec(): JsonObject = buildJsonObject {
+        putJsonObject("views") {
+            put("a", textSpec("a"))
+            put("b", textSpec("b"))
+        }
+        put("initial_view", "a")
+    }
+
+    @Test
+    fun acceptedMutationsWriteOnlyTheirOwnRecordThroughAnIncrementalBacking() {
+        val backing = IncrementalCountingBacking()
+        val s = SurfaceStore(16, 1024, backing = backing)
+        update(s, "app:a", 1, inputSpec("authored"))
+        update(s, "app:b", 1)
+        assertEquals(listOf("app:a", "app:b"), backing.puts.map { it.surface })
+        assertEquals("a second surface never rewrites the first", 0, backing.wholeWrites)
+
+        // A refresh: that surface's record alone, present at its new revision.
+        update(s, "app:b", 2)
+        assertEquals(3, backing.puts.size)
+        assertEquals("app:b", backing.puts.last().surface)
+        assertEquals(2L, backing.puts.last().revision)
+        assertTrue(backing.puts.last().present)
+
+        // SPEC 14.2 view.switch is record state: one record too.
+        s.update("app:v", 1, multiViewSpec(), null, null, null)
+        assertTrue(s.switchView("app:v", "b"))
+        assertEquals("app:v", backing.puts.last().surface)
+        assertEquals("b", backing.puts.last().currentView)
+
+        // SPEC 13.3: the tombstone is one record as well.
+        s.remove("app:b", 3)
+        val tombstone = backing.puts.last()
+        assertEquals("app:b", tombstone.surface)
+        assertFalse(tombstone.present)
+        assertNull(tombstone.spec)
+
+        // SPEC 13.6: a snapshot that clears a draft commits the record and the
+        // reconciled drafts together, as the atomic replace did.
+        s.putDraft("app:a", "title", JsonPrimitive("typed"))
+        assertEquals(1, backing.draftWrites)
+        update(s, "app:a", 2, inputSpec("typed"))
+        assertEquals(1, backing.putsWithDrafts.size)
+        assertEquals("app:a", backing.putsWithDrafts.single().first.surface)
+        assertTrue(backing.putsWithDrafts.single().second.isEmpty())
+        assertEquals(0, backing.wholeWrites)
+
+        // What it wrote is what it reloads.
+        val restored = SurfaceStore(16, 1024, backing = backing)
+        assertEquals(2L, restored.revisionOf("app:a"))
+        // SPEC 13.1: the tombstone's floor came back with it.
+        assertEquals(SurfaceResult("stale", 3, false), restored.remove("app:b", 3))
+        assertNull(restored.spec("app:b"))
+        assertEquals("b", restored.currentView("app:v"))
+    }
+
+    @Test
+    fun aFailedRecordWriteRollsBackAndADirtyCatalogFallsBackToTheWholeReplace() {
+        val backing = IncrementalCountingBacking()
+        val s = SurfaceStore(16, 1024, backing = backing)
+        backing.failNextPut = true
+        try {
+            update(s, "app:a", 1)
+            fail("record persistence failure was swallowed")
+        } catch (_: SurfacePersistenceFailed) { }
+        assertNull(s.spec("app:a"))
+        // Nothing durable changed, so nothing is dirty: the next write is
+        // still one record, not a repair of the whole catalog.
+        update(s, "app:a", 1)
+        assertEquals(1, backing.puts.size)
+        assertEquals(0, backing.wholeWrites)
+
+        // A best-effort view switch that fails leaves the catalog dirty; the
+        // next accepted mutation repairs it whole, and the one after that is
+        // one record again.
+        s.update("app:v", 1, multiViewSpec(), null, null, null)
+        backing.failNextPut = true
+        assertTrue(s.switchView("app:v", "b"))
+        val putsBefore = backing.puts.size
+        update(s, "app:a", 2)
+        assertEquals(1, backing.wholeWrites)
+        assertEquals(putsBefore, backing.puts.size)
+        assertEquals("b", backing.state.records.single { it.surface == "app:v" }.currentView)
+        update(s, "app:a", 3)
+        assertEquals(1, backing.wholeWrites)
+        assertEquals(putsBefore + 1, backing.puts.size)
+    }
+
     @Test
     fun surfaceRefreshWritesDraftsOnlyWhenReconciliationChangesThem() {
         class CountingBacking : SurfaceBacking {
@@ -1087,5 +1213,4 @@ class VocabularyDriftTest {
         for (name in fieldTypes.keys)
             assertEquals("$name type", fieldTypes.reqString(name), FIELD_TYPES.getValue(name))
     }
-
 }
