@@ -129,6 +129,24 @@ class SurfaceStore(
     // repair a prior best-effort surface write without serializing the entire
     // surface catalog on the ordinary successful path.
     private var recordsDirty = false
+
+    /** Diagnostic: when set, `update` and `patch` report how long each of
+     * their stages took — `apply` (ops and document bounds), `materialize`
+     * (bindings, templates, sharing), `admit` (the namespace validators) and
+     * `commit` (draft reconciliation and the durable write) — in nanoseconds.
+     * Null in production; the engine installs a sink only while a host
+     * observer is listening, so the measured path pays nothing otherwise. */
+    var stageSink: ((stage: String, nanos: Long) -> Unit)? = null
+
+    private inline fun <T> stage(name: String, block: () -> T): T {
+        val sink = stageSink ?: return block()
+        val t0 = System.nanoTime()
+        try {
+            return block()
+        } finally {
+            sink(name, System.nanoTime() - t0)
+        }
+    }
     // R6: a present key IS the draft; its value follows the draft seam, where
     // Kotlin null is the JSON null (see [PersistedDraft]).
     private val drafts = HashMap<Pair<String, String>, JsonElement?>()
@@ -625,7 +643,9 @@ class SurfaceStore(
                 throw ContentInvalid(it, "bind requires the data.model capability")
             }
             document = null
-            spec = prevSpec?.let { Materializer.share(authoredSpec, it) as JsonObject } ?: authoredSpec
+            spec = stage("materialize") {
+                prevSpec?.let { Materializer.share(authoredSpec, it) as JsonObject } ?: authoredSpec
+            }
             unbound = true
         } else {
             // SPEC 13.8.5: a template is admitted in app snapshots only.
@@ -639,9 +659,11 @@ class SurfaceStore(
                 }
             }
             document = data ?: JsonObject(emptyMap())
-            Materializer.checkDocument(document, "data")
-            val materialized = Materializer.materializeWithItems(authoredSpec, document, "spec", nodeVocabulary,
-                previous = prevSpec)
+            stage("apply") { Materializer.checkDocument(document, "data") }
+            val materialized = stage("materialize") {
+                Materializer.materializeWithItems(authoredSpec, document, "spec", nodeVocabulary,
+                    previous = prevSpec)
+            }
             spec = materialized.spec
             itemKeys = materialized.itemKeys
             unbound = materialized.unbound
@@ -657,7 +679,9 @@ class SurfaceStore(
                 throw ContentInvalid(it, "stale_spec MUST NOT carry bind")
             }
         }
-        val admitted = admit(surface, spec, staleSpec, currentView, resetIds, offlineWakeGranted)
+        val admitted = stage("admit") {
+            admit(surface, spec, staleSpec, currentView, resetIds, offlineWakeGranted)
+        }
         val statefuls = admitted.statefuls
         val reset = admitted.reset
         val isMultiView = admitted.isMultiView
@@ -700,7 +724,7 @@ class SurfaceStore(
             document,
             itemKeys,
         )
-        return commitSnapshot(surface, record, next, reset)
+        return stage("commit") { commitSnapshot(surface, record, next, reset) }
     }
 
     /**
@@ -716,13 +740,19 @@ class SurfaceStore(
         if (ops.isEmpty()) throw ContentInvalid("ops", "must be a non-empty array")
         if (ops.size > WireLimits.MAX_DATA_OPS) throw ContentInvalid("ops", "exceeds max_data_ops")
         var document = record.data ?: JsonObject(emptyMap())
-        document = DataOps.applyAll(document, ops)
-        Materializer.checkDocument(document, "data")
+        stage("apply") {
+            document = DataOps.applyAll(document, ops)
+            Materializer.checkDocument(document, "data")
+        }
         val authored = record.authoredSpec ?: record.spec!!
-        val materialized = Materializer.materializeWithItems(authored, document, "spec", nodeVocabulary,
-            previous = record.spec)
+        val materialized = stage("materialize") {
+            Materializer.materializeWithItems(authored, document, "spec", nodeVocabulary,
+                previous = record.spec)
+        }
         val spec = materialized.spec
-        val admitted = admit(surface, spec, record.staleSpec, null, null, offlineWakeGranted)
+        val admitted = stage("admit") {
+            admit(surface, spec, record.staleSpec, null, null, offlineWakeGranted)
+        }
         if (revision <= record.revision)
             return SurfaceResult("stale", record.revision, true)
         val next = Record(
@@ -737,7 +767,7 @@ class SurfaceStore(
             document,
             materialized.itemKeys,
         )
-        return commitSnapshot(surface, record, next, emptySet())
+        return stage("commit") { commitSnapshot(surface, record, next, emptySet()) }
     }
 
     /** SPEC 13.2/13.4: the namespace's validators, over the materialized [spec]. */

@@ -176,4 +176,52 @@ class SurfaceDataEngineTest {
         }).reqObj("error")
         assertEquals(-32601L, method.reqLong("code"))
     }
+
+    @Test
+    fun aStageObserverSeesEveryStageOfAnUpdateAndAPatchAndNothingOtherwise() {
+        val h = Harness(setOf("data.model"), listOf("data.model"))
+        // Nothing is timed while no observer listens: the store has no sink.
+        assertEquals(null, h.store.stageSink)
+        val seen = mutableListOf<Triple<String, String, Map<String, Long>>>()
+        h.engine.stageObserver = { method, surface, stages -> seen += Triple(method, surface, stages) }
+        h.engine.surfaceListener = { }
+        h.send("s1", "surface.update", buildJsonObject {
+            put("surface", "app:j"); put("revision", 1); put("spec", spec)
+            put("data", json("""{"journal":{"title":"Morning"}}"""))
+        })
+        assertEquals(1, seen.size)
+        assertEquals("surface.update", seen[0].first)
+        assertEquals("app:j", seen[0].second)
+        assertEquals(
+            listOf("decode", "apply", "materialize", "admit", "commit", "reply", "listener"),
+            seen[0].third.keys.toList(),
+        )
+        assertTrue(seen[0].third.values.all { it >= 0L })
+        h.send("d1", "surface.data", buildJsonObject {
+            put("surface", "app:j"); put("revision", 2)
+            put("ops", Json.parseToJsonElement("""[{"op":"set","path":"/journal/title","value":"Evening"}]"""))
+        })
+        assertEquals(2, seen.size)
+        assertEquals("surface.data", seen[1].first)
+        assertEquals(
+            listOf("decode", "apply", "materialize", "admit", "commit", "reply", "listener"),
+            seen[1].third.keys.toList(),
+        )
+        // A stale patch is answered without a commit or a listener run, and
+        // the sink is gone again once the observer has been told.
+        h.send("d2", "surface.data", buildJsonObject {
+            put("surface", "app:j"); put("revision", 2)
+            put("ops", Json.parseToJsonElement("""[{"op":"set","path":"/journal/title","value":"x"}]"""))
+        })
+        assertEquals(3, seen.size)
+        assertTrue("commit" !in seen[2].third)
+        assertTrue("listener" !in seen[2].third)
+        assertEquals(null, h.store.stageSink)
+        h.engine.stageObserver = null
+        h.send("d3", "surface.data", buildJsonObject {
+            put("surface", "app:j"); put("revision", 3)
+            put("ops", Json.parseToJsonElement("""[{"op":"set","path":"/journal/title","value":"Night"}]"""))
+        })
+        assertEquals(3, seen.size)
+    }
 }

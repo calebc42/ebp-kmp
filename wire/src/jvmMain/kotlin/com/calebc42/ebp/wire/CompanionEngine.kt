@@ -145,6 +145,48 @@ class CompanionEngine(
      * endpoint's, what to draw is the application's). */
     var surfaceListener: ((String) -> Unit)? = null
 
+    /**
+     * Diagnostic: when set, every `surface.update` and `surface.data` the
+     * engine handles reports how long each stage of its path took, in
+     * nanoseconds — `decode` (the frame's parse, measured from the previous
+     * dispatch), the store's `apply`, `materialize`, `admit` and `commit`
+     * (see [SurfaceStore.stageSink]), `reply` (the result frame's encode and
+     * write) and `listener` (the host's presentation hook). Null in
+     * production; nothing is timed while it is null.
+     */
+    var stageObserver: ((method: String, surface: String, stages: Map<String, Long>) -> Unit)? = null
+    private var decodeMark = 0L
+    private var decodeNanos = 0L
+
+    /** Run [block] with the store's stage sink collecting into a map that is
+     * handed to [stageObserver] afterwards, or with no sink at all. */
+    private inline fun <T> observed(
+        method: String,
+        surface: String,
+        block: (stages: MutableMap<String, Long>?) -> T,
+    ): T {
+        val observer = stageObserver ?: return block(null)
+        val stages = LinkedHashMap<String, Long>()
+        stages["decode"] = decodeNanos
+        surfaces.stageSink = { stage, nanos -> stages[stage] = (stages[stage] ?: 0L) + nanos }
+        try {
+            return block(stages)
+        } finally {
+            surfaces.stageSink = null
+            runCatching { observer(method, surface, stages) }
+        }
+    }
+
+    private inline fun <T> timed(stages: MutableMap<String, Long>?, name: String, block: () -> T): T {
+        if (stages == null) return block()
+        val t0 = System.nanoTime()
+        try {
+            return block()
+        } finally {
+            stages[name] = (stages[name] ?: 0L) + (System.nanoTime() - t0)
+        }
+    }
+
     /** Narrow presentation hook for a retained variant selection. Unlike a
      * surface update, this does not replace or republish the SurfaceSpec. */
     var variantListener: ((String, String, String) -> Unit)? = null
@@ -196,7 +238,9 @@ class CompanionEngine(
         while (drain) {
             drain = false
             try {
+                if (stageObserver != null) decodeMark = System.nanoTime()
                 decoder.feed(bytes, sourceOffset, sourceLength) { msg ->
+                    if (stageObserver != null) decodeNanos = System.nanoTime() - decodeMark
                     if (state != SessionState.CLOSED) {
                         try {
                             dispatch(msg)
@@ -206,6 +250,8 @@ class CompanionEngine(
                             close("dispatch failure: ${e.message}")
                         }
                     }
+                    // The next frame's decode is measured from here.
+                    if (stageObserver != null) decodeMark = System.nanoTime()
                 }
             } catch (e: FrameClose) { return close("frame: ${e.message}") }
             catch (e: FrameIncomplete) { return close("frame: ${e.message}") }
@@ -1304,24 +1350,28 @@ class CompanionEngine(
                     buildJsonObject { put("path", "data"); put("reason", "must be an object") },
                 )
             } else null
-            val result = surfaces.update(
-                surface, revision, spec,
-                params.objOrNull("stale_spec"),
-                params.stringOrNull("current_view"),
-                params.arrOrNull("reset_input_ids"),
-                staleAfterSeconds = staleAfterSeconds,
-                offlineWakeGranted = "offline.wake" in granted,
-                data = data,
-                dataModelGranted = "data.model" in granted,
-            )
-            respondResult(id, buildJsonObject {
-                put("status", result.status)
-                put("revision", result.revision)
-                put("present", result.present)
-            })
-            if (result.status == "applied") {
-                reconcileEditors(surface, newEditors)
-                surfaceListener?.invoke(surface)
+            observed("surface.update", surface) { stages ->
+                val result = surfaces.update(
+                    surface, revision, spec,
+                    params.objOrNull("stale_spec"),
+                    params.stringOrNull("current_view"),
+                    params.arrOrNull("reset_input_ids"),
+                    staleAfterSeconds = staleAfterSeconds,
+                    offlineWakeGranted = "offline.wake" in granted,
+                    data = data,
+                    dataModelGranted = "data.model" in granted,
+                )
+                timed(stages, "reply") {
+                    respondResult(id, buildJsonObject {
+                        put("status", result.status)
+                        put("revision", result.revision)
+                        put("present", result.present)
+                    })
+                }
+                if (result.status == "applied") {
+                    reconcileEditors(surface, newEditors)
+                    timed(stages, "listener") { surfaceListener?.invoke(surface) }
+                }
             }
         } catch (e: ContentInvalid) {
             respondError(id, 1201, "Invalid content", "content-invalid",
@@ -1347,18 +1397,23 @@ class CompanionEngine(
             return respondError(id, 1201, "Invalid content", "content-invalid",
                 buildJsonObject { put("reason", "surface-id") })
         try {
-            val result = surfaces.patch(
-                surface, revision, ops,
-                offlineWakeGranted = "offline.wake" in granted,
-            )
-            respondResult(id, buildJsonObject {
-                put("status", result.status)
-                put("revision", result.revision)
-                put("present", result.present)
-            })
-            // The tree is unchanged, so no editor session moves; the
-            // re-materialized snapshot is published like any applied update.
-            if (result.status == "applied") surfaceListener?.invoke(surface)
+            observed("surface.data", surface) { stages ->
+                val result = surfaces.patch(
+                    surface, revision, ops,
+                    offlineWakeGranted = "offline.wake" in granted,
+                )
+                timed(stages, "reply") {
+                    respondResult(id, buildJsonObject {
+                        put("status", result.status)
+                        put("revision", result.revision)
+                        put("present", result.present)
+                    })
+                }
+                // The tree is unchanged, so no editor session moves; the
+                // re-materialized snapshot is published like any applied update.
+                if (result.status == "applied")
+                    timed(stages, "listener") { surfaceListener?.invoke(surface) }
+            }
         } catch (e: ContentInvalid) {
             respondError(id, 1201, "Invalid content", "content-invalid",
                 buildJsonObject { put("path", e.path); put("reason", e.reason) })
