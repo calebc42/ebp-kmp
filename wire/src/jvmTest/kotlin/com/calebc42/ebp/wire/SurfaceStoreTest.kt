@@ -157,6 +157,31 @@ class SurfaceStoreTest {
     }
 
     @Test
+    fun switchViewRunsItsCallbackAfterTheMutationAndBeforeThePersist() {
+        val backing = IncrementalCountingBacking()
+        val s = SurfaceStore(16, 1024, backing = backing)
+        s.update("app:v", 1, multiViewSpec(), null, null, null)
+        val putsBefore = backing.puts.size
+        var seen: String? = null
+        var putsInside = -1
+        assertTrue(s.switchView("app:v", "b") {
+            seen = s.currentView("app:v")
+            putsInside = backing.puts.size
+        })
+        assertEquals("b", seen)
+        assertEquals(putsBefore, putsInside)
+        assertEquals(putsBefore + 1, backing.puts.size)
+        assertEquals("b", backing.puts.last().currentView)
+        // The callback's failure does not skip the persist.
+        try {
+            s.switchView("app:v", "a") { error("boom") }
+            fail("callback error was swallowed")
+        } catch (_: IllegalStateException) { }
+        assertEquals(putsBefore + 2, backing.puts.size)
+        assertEquals("a", backing.puts.last().currentView)
+    }
+
+    @Test
     fun aFailedRecordWriteRollsBackAndADirtyCatalogFallsBackToTheWholeReplace() {
         val backing = IncrementalCountingBacking()
         val s = SurfaceStore(16, 1024, backing = backing)

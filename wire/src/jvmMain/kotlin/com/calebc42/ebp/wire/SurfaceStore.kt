@@ -534,17 +534,29 @@ class SurfaceStore(
 
     /** SPEC 14.2 view.switch: valid only inside a present multi-view surface
      * whose snapshot names `view`; the local choice persists like any other
-     * presentation state. Returns whether the switch happened. */
-    fun switchView(surface: String, view: String): Boolean {
+     * presentation state. Returns whether the switch happened.
+     *
+     * [beforePersist], when given, runs once the view has changed in memory
+     * and before the durable write: the host publishes the new view from
+     * there, so the Back gesture draws without waiting for the commit. The
+     * persistence is best-effort either way (a failed write leaves the
+     * catalog dirty for the next accepted mutation to repair), so nothing
+     * the caller could observe differs between the two orders except the
+     * wait. A throwing callback does not skip the persist. */
+    fun switchView(surface: String, view: String, beforePersist: (() -> Unit)? = null): Boolean {
         val r = records[surface]?.takeIf { it.present } ?: return false
         val views = r.spec?.objOrNull("views") ?: return false
         if (view !in views) return false
         val wasRecordsDirty = recordsDirty
         r.currentView = view
         recordsDirty = true
-        // View choice is record state, no draft touched — and one record's
-        // state: the Back gesture must not rewrite the whole catalog.
-        tryPersistRecord(surface, wasRecordsDirty)
+        try {
+            beforePersist?.invoke()
+        } finally {
+            // View choice is record state, no draft touched — and one record's
+            // state: the Back gesture must not rewrite the whole catalog.
+            tryPersistRecord(surface, wasRecordsDirty)
+        }
         return true
     }
 

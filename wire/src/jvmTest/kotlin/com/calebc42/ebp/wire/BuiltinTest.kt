@@ -207,4 +207,69 @@ class BuiltinTest {
         assertEquals(1, out.events().size)
         assertEquals("app.open", out.events().single().reqObj("params").stringOr("action"))
     }
+
+    @Test
+    fun viewSwitchRepaintsBeforeItsDurableWrite() {
+        // PLAN-responsiveness C1: Back draws from the in-memory record; the
+        // commit follows. The backing logs its one-row write, the host
+        // listener logs its repaint, and the repaint comes first.
+        val log = mutableListOf<String>()
+        val backing = object : IncrementalSurfaceBacking {
+            var records = linkedMapOf<String, PersistedRecord>()
+            override fun load() = SurfaceState(records.values.toList(), emptyList())
+            override fun replaceRecords(records: List<PersistedRecord>) {
+                log += "replace"; this.records = records.associateByTo(linkedMapOf()) { it.surface }
+            }
+            override fun replaceDrafts(drafts: List<PersistedDraft>) = Unit
+            override fun replaceState(records: List<PersistedRecord>, drafts: List<PersistedDraft>) =
+                replaceRecords(records)
+            override fun putRecord(record: PersistedRecord) { log += "put"; records[record.surface] = record }
+            override fun putRecordWithDrafts(record: PersistedRecord, drafts: List<PersistedDraft>) =
+                putRecord(record)
+        }
+        val store = SurfaceStore(16, 1024, backing = backing)
+        val out = mutableListOf<JsonObject>()
+        val engine = CompanionEngine(CompanionConfig(
+            serverName = "kat", serverVersion = "1",
+            pairings = mapOf(katPid to katToken),
+            supportedCapabilities = setOf("theme"),
+            surfaceProfiles = buildJsonObject {
+                putJsonObject("app") {
+                    put("node_types", JsonArray(listOf("text", "button").map(::JsonPrimitive)))
+                    put("builtins", JsonArray(listOf("view.switch").map(::JsonPrimitive)))
+                    put("features", JsonArray(emptyList()))
+                    put("extensions", JsonArray(emptyList()))
+                }
+            },
+            limits = testLimits(), nonceSource = { katSn }), store) { bytes ->
+            FrameDecoder().let { d -> d.feed(bytes).forEach(out::add); d.finish() }
+        }
+        engine.feed(frame(request("h1", "session.hello",
+            EbpAuth.helloParams("t", "1", katPid, katCn, emptyList()))))
+        engine.feed(frame(request("h2", "auth.response",
+            EbpAuth.authParams(katPid, katCn, katSn, katToken))))
+        engine.feed(frame(request("r1", "session.ready", JsonObject(emptyMap()))))
+        engine.feed(frame(request("s1", "surface.update", buildJsonObject {
+            put("surface", "app:main"); put("revision", 1)
+            put("spec", multiViewSpec())
+        })))
+        log.clear()
+        engine.surfaceListener = { surface ->
+            log += "repaint:" + store.currentView(surface)
+        }
+        engine.dispatchAction("app:main",
+            buildJsonObject { put("builtin", "view.switch"); put("view", "detail") }, null)
+        assertEquals(listOf("repaint:detail", "put"), log)
+        assertEquals("detail", backing.records.getValue("app:main").currentView)
+        // A repaint that throws neither skips the commit nor fails the switch.
+        log.clear()
+        engine.surfaceListener = { log += "boom"; error("repaint failed") }
+        val outcomes = mutableListOf<ActionAdmissionOutcome>()
+        engine.dispatchAction("app:main",
+            buildJsonObject { put("builtin", "view.switch"); put("view", "main") }, null,
+            callback = outcomes::add)
+        assertEquals(listOf("boom", "put"), log)
+        assertEquals("main", backing.records.getValue("app:main").currentView)
+        assertEquals(ActionAdmissionOutcome.LocallyCompleted, outcomes.single())
+    }
 }

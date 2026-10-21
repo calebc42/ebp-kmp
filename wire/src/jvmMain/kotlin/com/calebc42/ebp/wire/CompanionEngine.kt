@@ -610,14 +610,18 @@ class CompanionEngine(
                     ?: return ActionAdmissionOutcome.NotAdmitted(
                         UnsafeAdmissionReason.InvalidContext,
                     )
-                if (!surfaces.switchView(surface, view)) {
+                // The host repaints from the in-memory record BEFORE the
+                // store's durable write, so Back draws without waiting for
+                // the commit. A host repaint fault cannot erase the local
+                // outcome, skip the persist, or strand the callback.
+                val switched = surfaces.switchView(surface, view) {
+                    runCatching { surfaceListener?.invoke(surface) }
+                }
+                if (!switched) {
                     return ActionAdmissionOutcome.NotAdmitted(
                         UnsafeAdmissionReason.InvalidContext,
                     )
                 }
-                // The view mutation already completed. A host repaint fault
-                // cannot erase that local outcome or strand its callback.
-                runCatching { surfaceListener?.invoke(surface) }
                 // SPEC 14.2: while READY, report view.switched with the view
                 // in args — when_offline drop, so never queued.
                 if (state != SessionState.READY) {
