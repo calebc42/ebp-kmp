@@ -19,7 +19,8 @@ import org.junit.Test
 
 class ActionEventTest {
 
-    private fun readyEngine(out: MutableList<JsonObject>): CompanionEngine {
+    private fun readyEngine(out: MutableList<JsonObject>,
+                            store: SurfaceStore = SurfaceStore(16, 1024)): CompanionEngine {
         val engine = CompanionEngine(CompanionConfig(
             serverName = "kat-companion", serverVersion = "1.0.0",
             pairings = mapOf(katPid to katToken),
@@ -34,7 +35,7 @@ class ActionEventTest {
                 }
             },
             limits = testLimits("max_rich_spans" to 4096, "max_table_cells" to 4096),
-            nonceSource = { katSn })) { bytes ->
+            nonceSource = { katSn }), store) { bytes ->
             FrameDecoder().let { d -> d.feed(bytes).forEach(out::add); d.finish() }
         }
         engine.feed(frame(request("h1", "session.hello",
@@ -57,6 +58,49 @@ class ActionEventTest {
         putJsonObject("args") { put("k", 1) }
         if (capture.isNotEmpty())
             put("capture_fields", JsonArray(capture.toList().map(::JsonPrimitive)))
+    }
+
+    @Test
+    fun anEventFlushesTheScheduledDraftWriteFirst() {
+        // PLAN-responsiveness C2d + SPEC 15.1: typing under a flush scheduler
+        // owes one draft write; the action's event.action leaves only after
+        // that write landed.
+        val log = mutableListOf<String>()
+        val backing = object : IncrementalSurfaceBacking {
+            var records = linkedMapOf<String, PersistedRecord>()
+            override fun load() = SurfaceState(records.values.toList(), emptyList())
+            override fun replaceRecords(records: List<PersistedRecord>) {
+                this.records = records.associateByTo(linkedMapOf()) { it.surface }
+            }
+            override fun replaceDrafts(drafts: List<PersistedDraft>) {
+                log += "drafts:" + drafts.joinToString { "${it.id}=${it.value}" }
+            }
+            override fun replaceState(records: List<PersistedRecord>, drafts: List<PersistedDraft>) {
+                replaceRecords(records); replaceDrafts(drafts)
+            }
+            override fun putRecord(record: PersistedRecord) { records[record.surface] = record }
+            override fun putRecordWithDrafts(record: PersistedRecord, drafts: List<PersistedDraft>) {
+                putRecord(record); replaceDrafts(drafts)
+            }
+        }
+        val store = SurfaceStore(16, 1024, backing = backing)
+        val out = mutableListOf<JsonObject>()
+        val engine = readyEngine(out, store)
+        val scheduled = mutableListOf<() -> Unit>()
+        store.draftFlushScheduler = { flush -> scheduled += flush }
+        engine.publishState("app:main", "title", JsonPrimitive("t"))
+        engine.publishState("app:main", "title", JsonPrimitive("ty"))
+        assertEquals("the window is open: no draft write yet", emptyList<String>(), log)
+        assertEquals(1, scheduled.size)
+        out.clear()
+        engine.dispatchAction("app:main", descriptor("title"), null) { }
+        // The event's frame reached the sink after the draft write.
+        val event = out.single { it["method"] == JsonPrimitive("event.action") }
+        assertEquals(JsonPrimitive("ty"), event.reqObj("params").reqObj("fields")["title"])
+        assertEquals(listOf("drafts:title=\"ty\""), log)
+        // The late scheduled flush then has nothing to write.
+        scheduled.single()()
+        assertEquals(1, log.size)
     }
 
     @Test

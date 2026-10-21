@@ -454,6 +454,7 @@ class SurfaceStore(
                 if (nextDrafts != null) incremental.putRecordWithDrafts(record, nextDrafts)
                 else incremental.putRecord(record)
                 recordsDirty = false
+                if (nextDrafts != null) draftsDirty = false
             } catch (failure: Exception) {
                 // One atomic write: nothing durable changed. The caller
                 // restores the in-memory candidate and the prior dirty state.
@@ -466,11 +467,13 @@ class SurfaceStore(
             if (nextDrafts != null && backing is AtomicSurfaceBacking) {
                 backing.replaceState(persistedRecords(), nextDrafts)
                 recordsDirty = false
+                draftsDirty = false
                 return
             }
             if (nextDrafts != null) {
                 backing.replaceDrafts(nextDrafts)
                 draftsReplaced = true
+                draftsDirty = false
             }
             backing.replaceRecords(persistedRecords())
             recordsDirty = false
@@ -1051,6 +1054,21 @@ class SurfaceStore(
 
     // ------------------------------------------------------ drafts (13.6)
 
+    /**
+     * How a typed draft reaches the backing (PLAN-responsiveness C2d). Null
+     * — the default, and every in-memory test — persists on every
+     * [putDraft], a durable write per keystroke. A host installs a scheduler
+     * that runs the given flush later, on the store's own thread, inside
+     * SPEC 14.6's 500 ms ceiling; consecutive keystrokes then coalesce into
+     * one write of the whole draft map. SPEC 15.1 still holds: the engine
+     * calls [flushDrafts] before it creates any event, and the strict
+     * [tryPutDraft] path and a snapshot that reconciles drafts write the
+     * whole map themselves.
+     */
+    var draftFlushScheduler: ((flush: () -> Unit) -> Unit)? = null
+    private var draftsDirty = false
+    private var draftFlushScheduled = false
+
     fun putDraft(surface: String, id: String, value: JsonElement?) {
         val node = records[surface]?.statefuls?.get(id) ?: return
         if (node.boolOr("password")) return // SPEC 14.6: never retained
@@ -1059,6 +1077,27 @@ class SurfaceStore(
         // event created from this interaction. LD-14: only drafts.json is
         // rewritten — a keystroke no longer re-serializes every spec and
         // every tombstone.
+        val scheduler = draftFlushScheduler
+        if (scheduler == null) {
+            persistDrafts()
+            return
+        }
+        draftsDirty = true
+        if (!draftFlushScheduled) {
+            draftFlushScheduled = true
+            scheduler { flushDrafts() }
+        }
+    }
+
+    /**
+     * Persist the drafts a scheduled flush still owes, if any: from the
+     * host's scheduler, and from the engine before it creates an event
+     * (SPEC 15.1). A no-op when nothing is pending.
+     */
+    fun flushDrafts() {
+        draftFlushScheduled = false
+        if (!draftsDirty) return
+        draftsDirty = false
         persistDrafts()
     }
 
@@ -1098,6 +1137,7 @@ class SurfaceStore(
                 return false
             }
             backing.replaceDrafts(persistedDrafts())
+            draftsDirty = false
             true
         } catch (_: Exception) {
             rollback()

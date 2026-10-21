@@ -851,6 +851,44 @@ class SurfaceStoreTest {
     }
 
     @Test
+    fun keystrokesCoalesceIntoOneScheduledDraftWrite() {
+        // PLAN-responsiveness C2d: with a flush scheduler installed, typing
+        // marks the drafts dirty and schedules one flush; the backing is
+        // written once, with the latest values, when that flush runs — or
+        // earlier, by flushDrafts() before an event (SPEC 15.1).
+        val backing = IncrementalCountingBacking()
+        val s = SurfaceStore(16, 1024, backing = backing)
+        s.update("app:main", 1, inputSpec("authored"), null, null, null)
+        val scheduled = mutableListOf<() -> Unit>()
+        s.draftFlushScheduler = { flush -> scheduled += flush }
+        s.putDraft("app:main", "title", JsonPrimitive("t"))
+        s.putDraft("app:main", "title", JsonPrimitive("ty"))
+        s.putDraft("app:main", "title", JsonPrimitive("typ"))
+        assertEquals("nothing written while the window is open", 0, backing.draftWrites)
+        assertEquals("one flush scheduled for the burst", 1, scheduled.size)
+        assertEquals(JsonPrimitive("typ"), s.currentValue("app:main", "title"))
+        scheduled.single()()
+        assertEquals(1, backing.draftWrites)
+        assertEquals(listOf(PersistedDraft("app:main", "title", JsonPrimitive("typ"))), backing.state.drafts)
+        // Nothing owed: a flush writes nothing; a new keystroke schedules anew.
+        s.flushDrafts()
+        assertEquals(1, backing.draftWrites)
+        s.putDraft("app:main", "title", JsonPrimitive("typed"))
+        assertEquals(2, scheduled.size)
+        // An event before the window closes: flushDrafts writes now, and the
+        // late scheduled flush then has nothing to do.
+        s.flushDrafts()
+        assertEquals(2, backing.draftWrites)
+        scheduled.last()()
+        assertEquals(2, backing.draftWrites)
+        // Without a scheduler the historical path is unchanged: a write per keystroke.
+        s.draftFlushScheduler = null
+        s.putDraft("app:main", "title", JsonPrimitive("x"))
+        s.putDraft("app:main", "title", JsonPrimitive("xy"))
+        assertEquals(4, backing.draftWrites)
+    }
+
+    @Test
     fun draftsAndRecordsPersistToSeparateFiles() {
         // LD-14: a keystroke writes only drafts, leaving the records file
         // (specs + tombstones) untouched.

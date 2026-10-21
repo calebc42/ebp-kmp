@@ -447,6 +447,10 @@ class CompanionEngine(
         eraseEncodedFrame: Boolean,
         callback: (JsonObject?, JsonObject?) -> Unit,
     ) {
+        // SPEC 15.1: the input_state map is durable no later than any event
+        // created from the interaction — a scheduled draft flush (C2d) owed
+        // at this point lands before the event leaves.
+        if (method == "event.action") surfaces.flushDrafts()
         if (pendingHeld && pending.size <= PENDING_RESUME) pendingHeld = false
         if (bounded && (pendingHeld || pending.size >= PENDING_HOLD)) {
             pendingHeld = true
@@ -954,6 +958,7 @@ class CompanionEngine(
                 // org.json's getLong truncated it; a strict integer-spelling
                 // read would refuse a legal older peer. Same shape as
                 // dispatchContextless (C3).
+                surfaces.flushDrafts() // SPEC 15.1, see sendRequestInternal
                 when (queue.admit(params, policy,
                         descriptor.stringOr("dedupe").takeIf { it.isNotEmpty() },
                         integralLongOrNull(descriptor["ttl_s"])
