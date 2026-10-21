@@ -751,6 +751,12 @@ class SurfaceStore(
             throw ContentInvalid("surface", "no present snapshot to patch")
         if (ops.isEmpty()) throw ContentInvalid("ops", "must be a non-empty array")
         if (ops.size > WireLimits.MAX_DATA_OPS) throw ContentInvalid("ops", "exceeds max_data_ops")
+        // SPEC 13.2/13.8.4: at or below the floor the answer is `stale` and
+        // the state is left as it is — so nothing is applied, materialized or
+        // admitted for it (PLAN-responsiveness C6a). Validation precedes a
+        // state change; a stale request makes none.
+        if (revision <= record.revision)
+            return SurfaceResult("stale", record.revision, true)
         var document = record.data ?: JsonObject(emptyMap())
         stage("apply") {
             document = DataOps.applyAll(document, ops)
@@ -765,8 +771,6 @@ class SurfaceStore(
         val admitted = stage("admit") {
             admit(surface, spec, record.staleSpec, null, null, offlineWakeGranted)
         }
-        if (revision <= record.revision)
-            return SurfaceResult("stale", record.revision, true)
         val next = Record(
             revision,
             true,

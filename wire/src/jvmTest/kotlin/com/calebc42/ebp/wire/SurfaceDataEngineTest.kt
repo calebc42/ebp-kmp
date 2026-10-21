@@ -207,15 +207,15 @@ class SurfaceDataEngineTest {
             listOf("decode", "apply", "materialize", "admit", "commit", "reply", "listener"),
             seen[1].third.keys.toList(),
         )
-        // A stale patch is answered without a commit or a listener run, and
-        // the sink is gone again once the observer has been told.
+        // A stale patch is answered before any store work (C6a): only its
+        // decode and reply are timed, and the sink is gone again once the
+        // observer has been told.
         h.send("d2", "surface.data", buildJsonObject {
             put("surface", "app:j"); put("revision", 2)
             put("ops", Json.parseToJsonElement("""[{"op":"set","path":"/journal/title","value":"x"}]"""))
         })
         assertEquals(3, seen.size)
-        assertTrue("commit" !in seen[2].third)
-        assertTrue("listener" !in seen[2].third)
+        assertEquals(listOf("decode", "reply"), seen[2].third.keys.toList())
         assertEquals(null, h.store.stageSink)
         h.engine.stageObserver = null
         h.send("d3", "surface.data", buildJsonObject {

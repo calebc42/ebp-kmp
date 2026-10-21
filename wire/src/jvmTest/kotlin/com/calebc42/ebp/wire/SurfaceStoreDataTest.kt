@@ -122,6 +122,31 @@ class SurfaceStoreDataTest {
     }
 
     @Test
+    fun aStalePatchIsAnsweredBeforeAnyWork() {
+        // PLAN-responsiveness C6a: at or below the floor the reducer answers
+        // `stale` first — no apply, materialize or admit runs for it, and ops
+        // that would be content-invalid at a newer revision are never looked
+        // at, because validation guards a state change and a stale request
+        // makes none (SPEC 13.2/13.8.4).
+        val store = SurfaceStore(16, 1024)
+        store.update("app:j", 1, journal, null, null, null, data = document, dataModelGranted = true)
+        assertEquals(SurfaceResult("applied", 2, true), store.patch("app:j", 2, ops(
+            """[{"op":"set","path":"/journal/title","value":"Evening"}]""")))
+        val stages = mutableListOf<String>()
+        store.stageSink = { stage, _ -> stages += stage }
+        val invalidAtANewerRevision = ops("""[{"op":"remove","path":"/journal/missing"}]""")
+        assertEquals(SurfaceResult("stale", 2, true), store.patch("app:j", 2, invalidAtANewerRevision))
+        assertEquals(SurfaceResult("stale", 2, true), store.patch("app:j", 1, invalidAtANewerRevision))
+        assertEquals(emptyList<String>(), stages)
+        assertEquals("Evening", textOf(store.spec("app:j")))
+        assertEquals(2L, store.revisionOf("app:j"))
+        // The same ops above the floor are still validated and refused.
+        store.stageSink = null
+        assertThrows(ContentInvalid::class.java) { store.patch("app:j", 3, invalidAtANewerRevision) }
+        assertEquals(2L, store.revisionOf("app:j"))
+    }
+
+    @Test
     fun aPatchAppliesCompletelyOrNotAtAll() {
         val store = SurfaceStore(16, 1024)
         store.update("app:j", 1, journal, null, null, null, data = document, dataModelGranted = true)
