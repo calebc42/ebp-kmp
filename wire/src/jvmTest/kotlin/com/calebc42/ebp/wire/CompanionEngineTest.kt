@@ -17,6 +17,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -291,6 +292,58 @@ class CompanionEngineTest {
         engine.feed("X-No-Length: 1\r\n\r\n".toByteArray(Charsets.US_ASCII))
         assertEquals(SessionState.CLOSED, engine.state)
         assertNotNull(engine.closeReason)
+    }
+
+    // ------------------------------------- parsed frames (C2a, the reader)
+
+    @Test
+    fun aParsedFrameIsDispatchedExactlyAsItsBytesWouldBe() {
+        val out = mutableListOf<JsonObject>()
+        val engine = authedEngine(out)
+        // The transport decodes on its own thread and hands the engine the
+        // parsed frame (PLAN-responsiveness C2a).
+        engine.feedFrame(request("q1", "queue.replay", JsonObject(emptyMap())))
+        assertEquals(JsonPrimitive("q1"), out.last()["id"])
+        assertEquals(0L, out.last().reqObj("result").reqLong("remaining"))
+        engine.feedFrame(request("r1", "session.ready", JsonObject(emptyMap())))
+        assertEquals(SessionState.READY, engine.state)
+        // A closed engine ignores a late frame instead of answering it.
+        engine.close("test")
+        val before = out.size
+        engine.feedFrame(request("q2", "queue.replay", JsonObject(emptyMap())))
+        assertEquals(before, out.size)
+    }
+
+    @Test
+    fun aRecoverableDecoderFaultIsAnsweredWithIdNullAndTheSessionContinues() {
+        val out = mutableListOf<JsonObject>()
+        val engine = authedEngine(out)
+        assertTrue(engine.feedFailure(WireParseError("invalid UTF-8")))
+        assertEquals(JsonNull, out.last()["id"])
+        assertEquals(-32700L, out.last().reqObj("error").reqLong("code"))
+        assertEquals("parse-error", out.last().reqObj("error").reqObj("data").reqString("kind"))
+        assertTrue(engine.feedFailure(InvalidRequest("batch array")))
+        assertEquals(-32600L, out.last().reqObj("error").reqLong("code"))
+        assertEquals(SessionState.SYNCING, engine.state)
+        // The frame behind the bad one is still answered.
+        engine.feedFrame(request("q1", "queue.replay", JsonObject(emptyMap())))
+        assertEquals(JsonPrimitive("q1"), out.last()["id"])
+    }
+
+    @Test
+    fun aClosingDecoderFaultClosesTheSession() {
+        val out = mutableListOf<JsonObject>()
+        val engine = authedEngine(out)
+        val before = out.size
+        assertFalse(engine.feedFailure(FrameClose("header section too large")))
+        assertEquals(SessionState.CLOSED, engine.state)
+        assertEquals("frame: header section too large", engine.closeReason)
+        assertEquals("no error frame on a closing fault", before, out.size)
+        // Both outcomes agree with the byte-level feed above.
+        val out2 = mutableListOf<JsonObject>()
+        val e2 = authedEngine(out2)
+        assertFalse(e2.feedFailure(FrameIncomplete("stream ended")))
+        assertEquals(SessionState.CLOSED, e2.state)
     }
 
     // ------------------------------------------------- limits reservation

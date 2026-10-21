@@ -155,7 +155,6 @@ class CompanionEngine(
      * production; nothing is timed while it is null.
      */
     var stageObserver: ((method: String, surface: String, stages: Map<String, Long>) -> Unit)? = null
-    private var decodeMark = 0L
     private var decodeNanos = 0L
 
     /** Run [block] with the store's stage sink collecting into a map that is
@@ -238,45 +237,80 @@ class CompanionEngine(
         while (drain) {
             drain = false
             try {
-                if (stageObserver != null) decodeMark = System.nanoTime()
+                val timing = stageObserver != null
+                var mark = if (timing) System.nanoTime() else 0L
                 decoder.feed(bytes, sourceOffset, sourceLength) { msg ->
-                    if (stageObserver != null) decodeNanos = System.nanoTime() - decodeMark
-                    if (state != SessionState.CLOSED) {
-                        try {
-                            dispatch(msg)
-                        } catch (e: Exception) {
-                            // A dispatch failure must fail closed, never
-                            // crash-loop the host (review: poison-record).
-                            close("dispatch failure: ${e.message}")
-                        }
-                    }
+                    feedFrame(msg, if (timing) System.nanoTime() - mark else 0L)
                     // The next frame's decode is measured from here.
-                    if (stageObserver != null) decodeMark = System.nanoTime()
+                    if (timing) mark = System.nanoTime()
                 }
-            } catch (e: FrameClose) { return close("frame: ${e.message}") }
-            catch (e: FrameIncomplete) { return close("frame: ${e.message}") }
+            } catch (e: FrameClose) { feedFailure(e); return }
+            catch (e: FrameIncomplete) { feedFailure(e); return }
             catch (e: WireParseError) {
-                // SPEC 6.2: a complete body that is invalid UTF-8 or JSON gets
-                // a Parse Error with id:null; the stream stayed synchronized,
-                // so the connection MAY (and here does) continue.
-                emitFramingError(-32700, "Parse error", "parse-error")
-                if (state != SessionState.CLOSED) {
+                if (feedFailure(e)) {
                     sourceOffset = 0
                     sourceLength = 0
                     drain = true
                 }
             } catch (e: InvalidRequest) {
-                // SPEC 6.2/4.1: a non-object top level, batch array, or
-                // duplicate member names get one Invalid Request with
-                // id:null; continue.
-                emitFramingError(-32600, "Invalid Request", "invalid-request")
-                if (state != SessionState.CLOSED) {
+                if (feedFailure(e)) {
                     sourceOffset = 0
                     sourceLength = 0
                     drain = true
                 }
             }
         }
+    }
+
+    /**
+     * One complete, parsed inbound frame (PLAN-responsiveness C2a). A
+     * transport that decodes on its reader thread hands frames in here one
+     * at a time, so a partial frame is the reader's alone: nothing of the
+     * engine's is held while a multi-chunk snapshot is still arriving, and a
+     * UI action dispatched meanwhile takes this monitor at once. The
+     * byte-level [feed] is this method behind the engine's own decoder.
+     * [decodeNanos] is the frame's parse time as the caller measured it,
+     * reported as the `decode` stage to [stageObserver].
+     */
+    @Synchronized
+    fun feedFrame(message: JsonObject, decodeNanos: Long = 0L) {
+        if (state == SessionState.CLOSED) return
+        this.decodeNanos = decodeNanos
+        try {
+            dispatch(message)
+        } catch (e: Exception) {
+            // A dispatch failure must fail closed, never crash-loop the host
+            // (review: poison-record).
+            close("dispatch failure: ${e.message}")
+        }
+    }
+
+    /**
+     * A decoder fault from the transport's reader, given SPEC 6.2's outcome.
+     * A closing fault ([FrameClose], [FrameIncomplete]) ends the session. A
+     * recoverable one — a complete body that is invalid UTF-8 or JSON
+     * ([WireParseError]), or a non-object top level, batch array or
+     * duplicate member ([InvalidRequest]) — is answered with one id:null
+     * error and the connection continues, the decoder having already
+     * advanced past the bad frame. Returns whether the session is still
+     * open, so the caller knows to drain the frames pipelined behind.
+     */
+    @Synchronized
+    fun feedFailure(fault: Exception): Boolean {
+        when (fault) {
+            is WireParseError ->
+                // SPEC 6.2: a complete body that is invalid UTF-8 or JSON gets
+                // a Parse Error with id:null; the stream stayed synchronized,
+                // so the connection MAY (and here does) continue.
+                emitFramingError(-32700, "Parse error", "parse-error")
+            is InvalidRequest ->
+                // SPEC 6.2/4.1: a non-object top level, batch array, or
+                // duplicate member names get one Invalid Request with
+                // id:null; continue.
+                emitFramingError(-32600, "Invalid Request", "invalid-request")
+            else -> close("frame: ${fault.message}")
+        }
+        return state != SessionState.CLOSED
     }
 
     @Synchronized
