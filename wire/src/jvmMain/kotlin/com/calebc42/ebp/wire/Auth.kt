@@ -84,6 +84,30 @@ object EbpAuth {
     /** Fresh 32-hex nonce from the platform CSPRNG (SPEC 9.2). */
     fun generateNonce(): String = ByteArray(16).also(random::nextBytes).toHex()
 
+    /** SPEC 9.1: a pairing ID is exactly 32 lowercase hexadecimal characters. */
+    fun isValidPairingId(s: String): Boolean = NONCE.matches(s)
+
+    /**
+     * SPEC 9.1: the Companion generates the non-secret 16-octet pairing ID
+     * with the platform CSPRNG; this is its 32-hex display and wire form.
+     */
+    fun generatePairingId(): String = ByteArray(16).also(random::nextBytes).toHex()
+
+    /**
+     * SPEC 9.1: the Companion generates the secret 16-octet pairing token with
+     * the platform CSPRNG. The caller provisions it and then erases this array.
+     */
+    fun generatePairingToken(): ByteArray = ByteArray(16).also(random::nextBytes)
+
+    /**
+     * SPEC 9.1 display form: the 22-character RFC 4648 base64url encoding of
+     * the 16 octets with `=` padding omitted; the inverse of [decodePairingToken].
+     */
+    fun encodePairingToken(raw: ByteArray): String {
+        require(raw.size == 16) { "pairing token must contain 16 octets" }
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(raw)
+    }
+
     /** SPEC 9.3 client proof over the exact ASCII concatenation. */
     fun clientProof(token: ByteArray, pairingId: String,
                     clientNonce: String, serverNonce: String): String =
