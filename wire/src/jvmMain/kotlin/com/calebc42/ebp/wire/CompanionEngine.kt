@@ -3190,7 +3190,7 @@ class CompanionEngine(
             // JsonNull write is the logical value, not a collapsed guard.
             for ((nodeId, node) in statefuls) {
                 if (!node.boolOr("password")) {
-                    put(nodeId, SurfaceStore.authoredValueOf(node) ?: JsonNull)
+                    put(nodeId, SurfaceStore.authoredValueOf(node, config.nodeVocabulary) ?: JsonNull)
                 }
             }
         }

@@ -1338,6 +1338,13 @@ class SurfaceStore(
             else -> null
         }
 
+        /** [authoredValueOf], and for a renderer extension's stateful node
+         * the member its manifest names in `stateful_when_present`: that
+         * member is the node's value (a `jetpacs.choice`'s `checked`). */
+        fun authoredValueOf(node: JsonObject, vocabulary: NodeVocabulary): JsonElement? =
+            authoredValueOf(node)
+                ?: vocabulary.statefulWhenPresent[node.reqString("t")]?.let { node[it] }
+
         /** The legal checkbox `state` strings (§17.4 tri-state). */
         val TRI_STATES: Set<String> = setOf("off", "on", "indeterminate")
 
@@ -1354,5 +1361,5 @@ class SurfaceStore(
             (v as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toDoubleOrNull()
     }
 
-    private fun authoredValue(node: JsonObject): JsonElement? = authoredValueOf(node)
+    private fun authoredValue(node: JsonObject): JsonElement? = authoredValueOf(node, nodeVocabulary)
 }
