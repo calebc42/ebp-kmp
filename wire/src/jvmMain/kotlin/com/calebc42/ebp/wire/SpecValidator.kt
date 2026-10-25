@@ -15,6 +15,7 @@ package com.calebc42.ebp.wire
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 class ContentInvalid(val path: String, val reason: String) :
     Exception("$reason at $path")
@@ -2216,7 +2217,8 @@ object SpecValidator {
             throw ContentInvalid("$path.$member", "must be an integer $lo..$hi")
     }
 
-    /** SPEC 17.2: a RichSpan MUST contain text: string. Every RichSpan in the
+    /** SPEC 17.2: a RichSpan MUST contain text: string, and its optional
+     * scale is a number 0.5..2.0 (amendment #201). Every RichSpan in the
      * document — rich_text spans and table-cell spans alike — spends the
      * SPEC 4.5 aggregate max_rich_spans allowance. */
     private fun validateSpans(spans: JsonElement?, path: String, ctx: Ctx) {
@@ -2230,6 +2232,13 @@ object SpecValidator {
                 ?: throw ContentInvalid("$path[$i]", "must be a span object")
             if (span.stringOrNull("text") == null)
                 throw ContentInvalid("$path[$i].text", "span text must be a string")
+            // Amendment #201: scale multiplies the run's font size, 0.5..2.0.
+            if ("scale" in span) {
+                val scale = (span["scale"] as? JsonPrimitive)
+                    ?.takeUnless { it.isString }?.content?.toDoubleOrNull()
+                if (scale == null || scale.isNaN() || scale < 0.5 || scale > 2.0)
+                    throw ContentInvalid("$path[$i].scale", "span scale must be a number 0.5..2.0")
+            }
         }
     }
 

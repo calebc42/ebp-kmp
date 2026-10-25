@@ -343,7 +343,7 @@ val STATEFUL_NODE_TYPES: Set<String> = setOf(
     // `checked` is present — see the `editor` precedent.
     "button", "icon_button")
 
-val ACTION_HOOK_KEYS: Set<String> = setOf("on_tap", "on_change", "on_submit", "on_save", "on_enter", "on_pick", "on_reorder", "on_refresh", "on_sheet_change", "on_expand_change", "on_long_tap", "on_add_row", "on_add_col", "on_day_tap", "on_month_change", "on_point_tap", "on_trigger", "on_search", "on_action", "header_action")
+val ACTION_HOOK_KEYS: Set<String> = setOf("on_tap", "on_change", "on_submit", "on_save", "on_enter", "on_pick", "on_reorder", "on_refresh", "on_back", "on_sheet_change", "on_expand_change", "on_long_tap", "on_add_row", "on_add_col", "on_day_tap", "on_month_change", "on_point_tap", "on_trigger", "on_search", "on_action", "header_action")
 
 val OFFLINE_POLICIES: Set<String> = setOf("drop", "queue", "wake")
 const val OFFLINE_DEFAULT = "drop"
@@ -388,7 +388,7 @@ val NODE_SCHEMA: Map<String, NodeRow> = mapOf(
     "chart" to NodeRow(setOf("series"), setOf("kind", "height", "y_range", "summary", "on_point_tap", "children")),
     "canvas" to NodeRow(setOf("width", "height", "ops"), setOf("children")),
     "month_grid" to NodeRow(setOf("month"), setOf("marks", "day_styles", "selected", "min_month", "max_month", "min_date", "max_date", "disabled_weekdays", "range_start", "range_end", "on_day_tap", "on_month_change", "children")),
-    "scaffold" to NodeRow(setOf(), setOf("top_bar", "body", "bottom_bar", "fab", "floating_toolbar", "drawer", "snackbar", "snackbar_action", "on_refresh", "top_bar_style", "top_bar_subtitle", "scroll_behavior", "floating_toolbar_orientation", "floating_toolbar_expanded", "floating_toolbar_placement", "floating_toolbar_fab", "floating_toolbar_scroll", "floating_toolbar_exit_direction", "refresh_indicator", "is_refreshing", "snackbar_duration", "snackbar_dismiss", "snackbar_max_lines", "sheet", "sheet_peek_height", "sheet_state", "on_sheet_change", "fab_hide_on_scroll", "drawer_variant", "bottom_bar_behavior", "fab_position", "top_bar_expanded", "top_bar_collapsed_height", "top_bar_expanded_height", "top_bar_centered", "snackbar_content", "rail")),
+    "scaffold" to NodeRow(setOf(), setOf("top_bar", "body", "bottom_bar", "fab", "floating_toolbar", "drawer", "snackbar", "snackbar_action", "on_refresh", "on_back", "top_bar_style", "top_bar_subtitle", "scroll_behavior", "floating_toolbar_orientation", "floating_toolbar_expanded", "floating_toolbar_placement", "floating_toolbar_fab", "floating_toolbar_scroll", "floating_toolbar_exit_direction", "refresh_indicator", "is_refreshing", "snackbar_duration", "snackbar_dismiss", "snackbar_max_lines", "sheet", "sheet_peek_height", "sheet_state", "on_sheet_change", "fab_hide_on_scroll", "drawer_variant", "bottom_bar_behavior", "fab_position", "top_bar_expanded", "top_bar_collapsed_height", "top_bar_expanded_height", "top_bar_centered", "snackbar_content", "rail")),
     "tooltip" to NodeRow(setOf("children", "text"), setOf("position", "caret", "caret_width", "caret_height", "rich", "title", "action_label", "on_action", "shown")),
     "pane_scaffold" to NodeRow(setOf("list", "detail"), setOf("extra", "variant")),
     "navigation_rail" to NodeRow(setOf("items"), setOf("variant", "expanded", "arrangement", "header", "hide_on_collapse", "on_expand_change")),
