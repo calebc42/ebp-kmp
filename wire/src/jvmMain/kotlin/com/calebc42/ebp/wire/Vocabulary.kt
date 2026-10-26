@@ -406,7 +406,7 @@ val NODE_SCHEMA: Map<String, NodeRow> = mapOf(
     "chip" to NodeRow(setOf("label"), setOf("on_tap", "selected", "icon", "enabled", "variant", "trailing_icon", "avatar", "content_spacing")),
     "menu" to NodeRow(setOf(), setOf("items", "groups", "footer", "icon", "enabled", "initial_scroll")),
     "text_input" to NodeRow(setOf("id"), setOf("value", "hint", "label", "on_change", "on_submit", "single_line", "min_lines", "max_lines", "monospace", "syntax", "password", "keyboard", "autofocus", "clear_on_submit", "enabled", "variant", "is_error", "supporting_text", "prefix", "suffix", "leading_icon", "trailing_icon", "max_length", "selection", "hide_keyboard_on_submit", "content_padding", "mask", "filter", "suggestions")),
-    "editor" to NodeRow(setOf("id"), setOf("document", "value", "on_save", "on_enter", "single_line", "min_lines", "max_lines", "read_only", "syntax", "line_numbers", "complete", "chromeless", "publish_state", "autofocus", "toolbar", "enabled")),
+    "editor" to NodeRow(setOf("id"), setOf("document", "value", "hint", "on_save", "on_enter", "single_line", "min_lines", "max_lines", "read_only", "syntax", "line_numbers", "complete", "chromeless", "publish_state", "autofocus", "toolbar", "enabled")),
     "checkbox" to NodeRow(setOf("id"), setOf("checked", "state", "stroke", "label", "on_change", "enabled")),
     "switch" to NodeRow(setOf("id"), setOf("checked", "label", "on_change", "enabled", "thumb_icon")),
     "enum_list" to NodeRow(setOf("id", "options"), setOf("value", "multi_select", "allow_add", "on_change", "enabled", "variant", "children")),
