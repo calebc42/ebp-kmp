@@ -34,6 +34,8 @@ val METHOD_REGISTRY: Map<String, MethodSpec> = mapOf(
     "window.changed" to MethodSpec(Sender.COMPANION, false, SR),
     // SPEC 20.1.2 (#197): device locale advice, mirrored in the welcome.
     "locale.changed" to MethodSpec(Sender.COMPANION, false, SR),
+    // SPEC 20.1.3 (#205): the device's color scheme, mirrored in the welcome.
+    "colors.changed" to MethodSpec(Sender.COMPANION, false, SR),
     "dialog.show" to MethodSpec(Sender.EMACS, true, R),
     "snackbar.show" to MethodSpec(Sender.EMACS, true, R),
     "toast.show" to MethodSpec(Sender.EMACS, false, R),

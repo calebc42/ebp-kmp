@@ -281,6 +281,7 @@ val ENUMS: Map<String, Set<String>> = mapOf(
     "theme.layout_direction" to setOf("ltr", "rtl"),
     "window.size_class" to setOf("compact", "medium", "expanded"),
     "locale.hour_cycle" to setOf("h12", "h23"),
+    "colors.polarity" to setOf("light", "dark"),
     "visible.op" to setOf("present", "absent", "empty", "non_empty", "eq", "neq", "lt", "lte", "gt", "gte"),
     "snackbar.result" to setOf("dismissed", "action"),
 )

@@ -523,6 +523,47 @@ class CompanionEngineTest {
         assertTrue("locale" !in out.last().reqObj("result"))
     }
 
+    // --------------------------------------- device colors (20.1.3, #205)
+
+    private val lightRoles = mapOf("primary" to "#396286", "on_primary" to "#ffffff",
+        "surface_container_low" to "#f1f4fa")
+    private val darkRoles = mapOf("primary" to "#b4c5ff", "on_primary" to "#1a2d60",
+        "surface_container_low" to "#1a1b20")
+
+    @Test
+    fun deviceColorsAreMirroredAndEmittedOnlyOnChange() {
+        val out = mutableListOf<JsonObject>()
+        val engine = engine(out)
+        // Stored before authentication, never emitted there.
+        engine.colorsChanged(true, lightRoles, darkRoles)
+        assertEquals(0, out.size)
+        engine.feed(frame(hello()))
+        engine.feed(frame(auth()))
+        val mirror = out.last().reqObj("result").reqObj("colors")
+        assertEquals("dark", mirror.reqString("polarity"))
+        assertEquals("#396286", mirror.reqObj("light").reqString("primary"))
+        assertEquals("#1a1b20", mirror.reqObj("dark").reqString("surface_container_low"))
+        assertEquals(3, mirror.size)
+        val before = out.size
+        engine.colorsChanged(true, lightRoles, darkRoles)
+        assertEquals("an unchanged object is never re-sent", before, out.size)
+        engine.colorsChanged(false, lightRoles, darkRoles)
+        val note = out.last()
+        assertEquals(JsonPrimitive("colors.changed"), note["method"])
+        assertTrue("a notification carries no id", "id" !in note)
+        assertEquals("light", note.reqObj("params").reqString("polarity"))
+        // A new wallpaper is a changed scheme at the same polarity.
+        engine.colorsChanged(false, lightRoles, darkRoles + ("primary" to "#ffb4ab"))
+        assertEquals("#ffb4ab", out.last().reqObj("params").reqObj("dark").reqString("primary"))
+    }
+
+    @Test
+    fun welcomeOmitsColorsWhileUnknown() {
+        val out = mutableListOf<JsonObject>()
+        authedEngine(out)
+        assertTrue("colors" !in out.last().reqObj("result"))
+    }
+
     // -------------------------------------------- registry drift guard --
 
     @Test

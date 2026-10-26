@@ -3013,6 +3013,29 @@ class CompanionEngine(
             emit(notification("locale.changed", advice))
     }
 
+    /** SPEC 20.1.3 (#205): the last-reported device colors, mirrored in the
+     * welcome: the system polarity and the device's light and dark schemes.
+     * Presentation advice; the report changes nothing this endpoint draws. */
+    private var deviceColors: JsonObject? = null
+
+    /** SPEC 20.1.3: report the device's own color scheme — [dark] for the
+     * system appearance followed when `theme.set` omits `dark`, and the
+     * [light] and [dark] role maps (standard roles plus the platform's
+     * extended ones, lowercase `#rrggbb`). Stores always (the welcome
+     * mirror), emits only on a post-auth session, and never re-sends an
+     * unchanged object. */
+    fun colorsChanged(dark: Boolean, light: Map<String, String>, darkScheme: Map<String, String>) {
+        val colors = buildJsonObject {
+            put("polarity", if (dark) "dark" else "light")
+            put("light", buildJsonObject { light.forEach { (k, v) -> put(k, v) } })
+            put("dark", buildJsonObject { darkScheme.forEach { (k, v) -> put(k, v) } })
+        }
+        if (colors == deviceColors) return
+        deviceColors = colors
+        if (state == SessionState.READY || state == SessionState.SYNCING)
+            emit(notification("colors.changed", colors))
+    }
+
     private fun sizeClassOf(dp: Int, mediumAt: Int, expandedAt: Int): String =
         when {
             dp >= expandedAt -> "expanded"
@@ -3446,6 +3469,9 @@ class CompanionEngine(
             // snapshot can be authored for the device's clock cycle and civil
             // day; omitted while unknown.
             localeAdvice?.let { put("locale", it) }
+            // SPEC 20.1.3 (#205): mirror the device colors so the FIRST
+            // snapshot can be authored in them; omitted while unknown.
+            deviceColors?.let { put("colors", it) }
             // SPEC 10.2: input_state MUST be omitted when empty; device waits
             // for the capability/trigger modules.
             surfaces.inputState().takeIf { it.isNotEmpty() }
