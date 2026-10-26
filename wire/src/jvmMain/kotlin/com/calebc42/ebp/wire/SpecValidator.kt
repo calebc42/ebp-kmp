@@ -96,7 +96,7 @@ private val OPAQUE_NODE_WALK_MEMBERS = setOf("args", "meta", "value")
 object SpecValidator {
     /** Members a submenu row (amendment #203) may not carry. */
     private val SUBMENU_ROW_FORBIDDEN =
-        listOf("on_tap", "checked", "checked_icon", "trailing_icon", "trailing_text")
+        listOf("on_tap", "checked", "checked_icon", "unchecked_icon", "trailing_icon", "trailing_text")
 
     private data class CaptureRef(
         val path: String,
@@ -1713,6 +1713,9 @@ object SpecValidator {
                                 "$at[$i]",
                                 "trailing_icon and trailing_text are mutually exclusive",
                             )
+                        // Amendment #204: the unchecked glyph needs a checkable item.
+                        if ("unchecked_icon" in item && "checked" !in item)
+                            throw ContentInvalid("$at[$i].unchecked_icon", "requires checked")
                     }
                 }
                 if (hasGroups) {

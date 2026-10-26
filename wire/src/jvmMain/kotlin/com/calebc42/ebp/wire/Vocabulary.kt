@@ -665,6 +665,7 @@ val FIELD_TYPES: Map<String, String> = mapOf(
     "trailing_icon" to "identifier",
     "trailing_label" to "string",
     "trailing_text" to "string",
+    "unchecked_icon" to "identifier",
     "underline" to "boolean",
     "url" to "string",
     "value" to "varies-per-node",

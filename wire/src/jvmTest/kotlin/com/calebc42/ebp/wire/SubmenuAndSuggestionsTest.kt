@@ -63,6 +63,15 @@ class SubmenuAndSuggestionsTest {
     }
 
     @Test
+    fun anUncheckedGlyphNeedsACheckableItem() {
+        assertTrue(rejection(menu("""[{"label":"A","checked":false,"unchecked_icon":"radio_button_unchecked",
+                                       "on_tap":{"action":"demo.a"}}]""")) == null)
+        val reason = rejection(menu("""[{"label":"A","unchecked_icon":"radio_button_unchecked",
+                                         "on_tap":{"action":"demo.a"}}]"""))
+        assertTrue(reason.orEmpty(), reason.orEmpty().contains("requires checked"))
+    }
+
+    @Test
     fun suggestionsAreWholeWordsAndNeverASecret() {
         fun input(extra: String) =
             Json.parseToJsonElement("""{"t":"text_input","id":"tags",$extra}""") as JsonObject
