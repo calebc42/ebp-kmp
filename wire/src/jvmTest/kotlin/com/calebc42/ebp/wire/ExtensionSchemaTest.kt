@@ -118,6 +118,15 @@ class ExtensionSchemaTest {
                 "{\"label\":\"Archive\",\"on_trigger\":{\"action\":\"example.archive\"}}",
                 "[]",
             ) to "spec.swipe_end",
+            // Amendment #207: an unknown presentation, and commit with popup.
+            validRaw.replace(
+                "{\"label\":\"Archive\",\"on_trigger\":{\"action\":\"example.archive\"}}",
+                "{\"presentation\":\"drawer\",\"actions\":[{\"label\":\"Archive\",\"on_trigger\":{\"action\":\"example.archive\"}}]}",
+            ) to "spec.swipe_end.presentation",
+            validRaw.replace(
+                "{\"label\":\"Archive\",\"on_trigger\":{\"action\":\"example.archive\"}}",
+                "{\"presentation\":\"popup\",\"commit\":true,\"actions\":[{\"label\":\"Archive\",\"on_trigger\":{\"action\":\"example.archive\"}}]}",
+            ) to "spec.swipe_end.commit",
         )
         for ((raw, expectedPath) in cases) {
             val invalid = assertThrows(ContentInvalid::class.java) { validate(raw) }

@@ -170,7 +170,7 @@ val WIDGET_SIZE_VARIANT_OPTIONAL: Set<String> = setOf()
 val LEGACY_SWIPE_REQUIRED: Set<String> = setOf("label", "on_trigger")
 val LEGACY_SWIPE_OPTIONAL: Set<String> = setOf("icon", "color")
 val RICH_SWIPE_REQUIRED: Set<String> = setOf("actions")
-val RICH_SWIPE_OPTIONAL: Set<String> = setOf("commit")
+val RICH_SWIPE_OPTIONAL: Set<String> = setOf("commit", "presentation")
 val SWIPE_ACTION_REQUIRED: Set<String> = setOf("label", "on_trigger")
 val SWIPE_ACTION_OPTIONAL: Set<String> = setOf("icon", "color")
 const val SWIPE_COMMIT_MAX_ACTIONS = 2
@@ -282,6 +282,7 @@ val ENUMS: Map<String, Set<String>> = mapOf(
     "window.size_class" to setOf("compact", "medium", "expanded"),
     "locale.hour_cycle" to setOf("h12", "h23"),
     "colors.polarity" to setOf("light", "dark"),
+    "swipe.presentation" to setOf("reveal", "popup"),
     "visible.op" to setOf("present", "absent", "empty", "non_empty", "eq", "neq", "lt", "lte", "gt", "gte"),
     "snackbar.result" to setOf("dismissed", "action"),
 )

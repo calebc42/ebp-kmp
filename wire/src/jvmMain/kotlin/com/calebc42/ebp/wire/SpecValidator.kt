@@ -2755,6 +2755,15 @@ object SpecValidator {
                 "$path.commit",
                 "deep commit supports at most $SWIPE_COMMIT_MAX_ACTIONS actions",
             )
+        // Amendment #207: a popup side never displaces the item, so it has
+        // no deeper travel to commit on.
+        if ("presentation" in side) {
+            val presentation = side.stringOrNull("presentation")
+            if (presentation == null || presentation !in ENUMS.getValue("swipe.presentation"))
+                throw ContentInvalid("$path.presentation", "not in enums.swipe.presentation")
+            if (presentation == "popup" && side.boolOr("commit"))
+                throw ContentInvalid("$path.commit", "a popup side cannot commit")
+        }
         val labels = mutableSetOf<String>()
         actions.forEachIndexed { index, element ->
             val action = element as? JsonObject
