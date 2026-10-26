@@ -733,7 +733,8 @@ class CompanionEngine(
                     },
                 )
             }
-            "surface.open", "clipboard.copy", "share.send", "companion.settings.open" -> {
+            "surface.open", "clipboard.copy", "share.send", "uri.open",
+            "companion.settings.open" -> {
                 val listener = hostBuiltinListener
                     ?: return ActionAdmissionOutcome.NotAdmitted(
                         UnsafeAdmissionReason.InvalidContext,

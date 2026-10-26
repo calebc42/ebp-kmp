@@ -283,6 +283,7 @@ val ENUMS: Map<String, Set<String>> = mapOf(
     "locale.hour_cycle" to setOf("h12", "h23"),
     "colors.polarity" to setOf("light", "dark"),
     "swipe.presentation" to setOf("reveal", "popup"),
+    "uri.scheme" to setOf("http", "https", "mailto", "tel", "voicemail", "geo", "sms", "smsto", "mms", "mmsto"),
     "visible.op" to setOf("present", "absent", "empty", "non_empty", "eq", "neq", "lt", "lte", "gt", "gte"),
     "snackbar.result" to setOf("dismissed", "action"),
 )
@@ -436,6 +437,7 @@ val ACTION_SCHEMA: Map<String, ActionRow> = mapOf(
     "surface.open" to ActionRow(setOf("builtin", "surface"), setOf()),
     "clipboard.copy" to ActionRow(setOf("builtin", "text"), setOf()),
     "share.send" to ActionRow(setOf("builtin", "text"), setOf("title")),
+    "uri.open" to ActionRow(setOf("builtin", "uri"), setOf()),
     "companion.settings.open" to ActionRow(setOf("builtin"), setOf()),
     "trigger.fire" to ActionRow(setOf("builtin", "id"), setOf()),
     "dialog.submit" to ActionRow(setOf("builtin"), setOf("value", "capture_fields")),

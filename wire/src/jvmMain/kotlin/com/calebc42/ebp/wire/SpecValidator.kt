@@ -84,9 +84,28 @@ private val CONTEXTLESS_BUILTINS = setOf(
     "surface.open",
     "clipboard.copy",
     "share.send",
+    "uri.open",
     "companion.settings.open",
     "trigger.fire",
 )
+
+/** Amendment #208: `uri.open` — an absolute URI of at most 2048 octets in
+ * the closed `uri.scheme` set, with no user information. */
+internal fun validUriOpenTarget(uri: String): Boolean {
+    if (uri.toByteArray(Charsets.UTF_8).size > 2048) return false
+    val colon = uri.indexOf(':')
+    if (colon <= 0) return false
+    val scheme = uri.substring(0, colon)
+    if (!scheme.first().isLetter() ||
+        !scheme.all { it.isLetterOrDigit() || it == '+' || it == '.' || it == '-' }) return false
+    if (scheme.lowercase() !in ENUMS.getValue("uri.scheme")) return false
+    val rest = uri.substring(colon + 1)
+    if (rest.startsWith("//")) {
+        val authority = rest.substring(2).substringBefore('/').substringBefore('?').substringBefore('#')
+        if ('@' in authority) return false
+    }
+    return true
+}
 
 /** Contract-defined application-data members. Objects below these names are
  * values, not node positions, even when application data happens to contain
@@ -2883,6 +2902,11 @@ object SpecValidator {
                         value
                     } else null
                     ctx.variantRefs.add(Triple(path, id, requested))
+                }
+                "uri.open" -> {
+                    val uri = obj.stringOrNull("uri")
+                    if (uri == null || !validUriOpenTarget(uri))
+                        throw ContentInvalid("$path.uri", "must be a URI in enums.uri.scheme")
                 }
             }
         }
