@@ -268,6 +268,20 @@ data class TextInputMaskContract(
     val incompatibleWith: Set<String>,
 )
 
+/** Contract-projected word completion for a text input (amendment #202). */
+data class TextInputSuggestionsContract(
+    val minItems: Int,
+    val maxItems: Int,
+    val itemMinLength: Int,
+    val itemMaxLength: Int,
+    val itemForbids: String,
+    val word: String,
+    val match: String,
+    val pick: String,
+    val caretOnWire: Boolean,
+    val incompatibleWith: Set<String>,
+)
+
 /** Contract-projected interior-padding rule for a text input. */
 data class TextInputPaddingContract(
     val type: String,
@@ -287,6 +301,7 @@ data class TextInputContract(
     val filterAuthoredValueMustMatch: Boolean,
     val filterRetainedDraftMustMatch: Boolean,
     val mask: TextInputMaskContract,
+    val suggestions: TextInputSuggestionsContract,
     val contentPadding: TextInputPaddingContract,
     val variantDefault: String,
     val variantUnknown: String,
@@ -406,6 +421,18 @@ val TEXT_INPUT_CONTRACT = TextInputContract(
         unit = "{contract["text_input_schema"]["mask"]["unit"]}",
         overflow = "{contract["text_input_schema"]["mask"]["overflow"]}",
         incompatibleWith = {kt_set(contract["text_input_schema"]["mask"]["incompatible_with"])},
+    ),
+    suggestions = TextInputSuggestionsContract(
+        minItems = {contract["text_input_schema"]["suggestions"]["min_items"]},
+        maxItems = {contract["text_input_schema"]["suggestions"]["max_items"]},
+        itemMinLength = {contract["text_input_schema"]["suggestions"]["item_min_length"]},
+        itemMaxLength = {contract["text_input_schema"]["suggestions"]["item_max_length"]},
+        itemForbids = "{contract["text_input_schema"]["suggestions"]["item_forbids"]}",
+        word = "{contract["text_input_schema"]["suggestions"]["word"]}",
+        match = "{contract["text_input_schema"]["suggestions"]["match"]}",
+        pick = "{contract["text_input_schema"]["suggestions"]["pick"]}",
+        caretOnWire = {str(contract["text_input_schema"]["suggestions"]["caret_on_wire"]).lower()},
+        incompatibleWith = {kt_set(contract["text_input_schema"]["suggestions"]["incompatible_with"])},
     ),
     contentPadding = TextInputPaddingContract(
         type = "{contract["text_input_schema"]["content_padding"]["type"]}",

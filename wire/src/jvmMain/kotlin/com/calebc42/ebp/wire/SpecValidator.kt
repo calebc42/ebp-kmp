@@ -94,6 +94,10 @@ private val CONTEXTLESS_BUILTINS = setOf(
 private val OPAQUE_NODE_WALK_MEMBERS = setOf("args", "meta", "value")
 
 object SpecValidator {
+    /** Members a submenu row (amendment #203) may not carry. */
+    private val SUBMENU_ROW_FORBIDDEN =
+        listOf("on_tap", "checked", "checked_icon", "trailing_icon", "trailing_text")
+
     private data class CaptureRef(
         val path: String,
         val names: List<String>,
@@ -1387,6 +1391,39 @@ object SpecValidator {
                     )
             }
         }
+
+        if ("suggestions" in node) {
+            // Amendment #202: whole words to complete, never the caret.
+            val rule = TEXT_INPUT_CONTRACT.suggestions
+            val words = node["suggestions"] as? JsonArray
+            if (words == null || words.size !in rule.minItems..rule.maxItems)
+                throw ContentInvalid(
+                    "$path.suggestions",
+                    "suggestions must be ${rule.minItems} to ${rule.maxItems} strings",
+                )
+            words.forEachIndexed { index, word ->
+                val text = (word as? JsonPrimitive)?.takeIf { it.isString }?.content
+                if (text == null ||
+                    textInputScalarLength(text) !in rule.itemMinLength..rule.itemMaxLength ||
+                    text.any(Char::isWhitespace))
+                    throw ContentInvalid(
+                        "$path.suggestions[$index]",
+                        "must be ${rule.itemMinLength} to ${rule.itemMaxLength} scalars without whitespace",
+                    )
+            }
+            for (member in rule.incompatibleWith) {
+                val present = when (member) {
+                    "password" -> node.boolOr(member)
+                    "mask" -> member in node
+                    else -> error("unsupported generated suggestions incompatibility $member")
+                }
+                if (present)
+                    throw ContentInvalid(
+                        "$path.suggestions",
+                        "suggestions are incompatible with $member",
+                    )
+            }
+        }
     }
 
     private fun validateNode(
@@ -1645,12 +1682,27 @@ object SpecValidator {
                 val hasGroups = "groups" in node
                 if (hasItems == hasGroups)
                     throw ContentInvalid(path, "menu carries exactly one of items|groups")
-                fun checkItems(arr: kotlinx.serialization.json.JsonArray, at: String) {
+                fun checkItems(arr: kotlinx.serialization.json.JsonArray, at: String, nested: Boolean = false) {
                     for (i in arr.indices) {
                         val item = arr[i] as? JsonObject
                             ?: throw ContentInvalid("$at[$i]", "must be a MenuItem object")
                         if (item.stringOrNull("label") == null)
                             throw ContentInvalid("$at[$i].label", "MenuItem label must be a string")
+                        if ("items" in item) {
+                            // Amendment #203: a submenu row opens its items,
+                            // one level deep, and has no action or trailing
+                            // member of its own.
+                            if (nested)
+                                throw ContentInvalid("$at[$i].items", "submenus nest one level")
+                            val sub = item.arrOrNull("items")
+                            if (sub == null || sub.isEmpty())
+                                throw ContentInvalid("$at[$i].items", "a submenu needs a non-empty MenuItem array")
+                            for (member in SUBMENU_ROW_FORBIDDEN)
+                                if (member in item)
+                                    throw ContentInvalid("$at[$i].$member", "a submenu row carries no $member")
+                            checkItems(sub, "$at[$i].items", nested = true)
+                            continue
+                        }
                         // A row that cannot dispatch is a row that does
                         // nothing when tapped; SPEC 17.4 has required this
                         // since format 6, and only the label was checked.

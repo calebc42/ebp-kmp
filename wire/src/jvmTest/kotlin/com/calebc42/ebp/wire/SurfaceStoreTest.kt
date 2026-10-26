@@ -1253,6 +1253,21 @@ class VocabularyDriftTest {
                     incompatibleWith = mask.reqArr("incompatible_with")
                         .mapNotNull(JsonElement::asStringOrNull).toSet(),
                 ),
+                suggestions = textInput.reqObj("suggestions").let { words ->
+                    TextInputSuggestionsContract(
+                        minItems = integralLongOrNull(words["min_items"])!!.toInt(),
+                        maxItems = integralLongOrNull(words["max_items"])!!.toInt(),
+                        itemMinLength = integralLongOrNull(words["item_min_length"])!!.toInt(),
+                        itemMaxLength = integralLongOrNull(words["item_max_length"])!!.toInt(),
+                        itemForbids = words.reqString("item_forbids"),
+                        word = words.reqString("word"),
+                        match = words.reqString("match"),
+                        pick = words.reqString("pick"),
+                        caretOnWire = words.boolOr("caret_on_wire"),
+                        incompatibleWith = words.reqArr("incompatible_with")
+                            .mapNotNull(JsonElement::asStringOrNull).toSet(),
+                    )
+                },
                 contentPadding = TextInputPaddingContract(
                     type = padding.reqString("type"),
                     appliesTo = padding.reqString("applies_to"),
