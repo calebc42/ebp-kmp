@@ -76,6 +76,18 @@ class TriggerFiringService(
     fun attach(s: LiveSession) { session.set(s) }
     fun detach(s: LiveSession) { session.compareAndSet(s, null) }
 
+    /**
+     * SPEC 5.8: what stands in for a session that does not exist, so a
+     * durable `wake` admission with no connection can still reach the
+     * platform's wake signal (SPEC 15.1 orders it after persistence, which
+     * step 5 below already is). Null, the default, keeps a cold firing
+     * silent, as before; a host that defines a wake mechanism sets it.
+     */
+    @Volatile var coldSession: LiveSession? = null
+
+    /** The attached session, else the cold stand-in, else nothing. */
+    private fun sessionOrCold(): LiveSession? = session.get() ?: coldSession
+
     private val runtime = TriggerRuntime(
         store, { queue.effectiveNow() }, zone, { stateProvider(it) },
         emit = ::admit, onFire = ::executeOnFire, persistRecords = store::persistRecords,
@@ -222,7 +234,7 @@ class TriggerFiringService(
                     }
                     occurrenceTransaction?.complete()
                     if (hasLocal) queue.clearPendingLocal(r.record.reqLong("queue_seq"))
-                    pending.add { session.get()?.onDurableAdmitted(policy) } // step 5, post-lock
+                    pending.add { sessionOrCold()?.onDurableAdmitted(policy) } // step 5, post-lock
                 }
                 else -> occurrenceTransaction?.abort()
                     // durable transaction failed: no throttle, no on_fire

@@ -80,6 +80,46 @@ class FiringServiceTest {
     }
 
     @Test
+    fun aColdWakeAdmissionReachesTheStandInSession() {
+        // SPEC 5.8: with no engine attached, a `wake` firing still asks the
+        // platform's wake (through the host-provided cold session), after
+        // the durable admit; without a stand-in, nothing is asked.
+        val store = TriggerStore(FileTriggerBacking(File(tmp.root, "w.json")))
+        val queue = DurableQueue(MemoryQueueStore(), 256, 8_388_608)
+        val state = hashMapOf<String, JsonObject>("battery.level" to battery(50))
+        val service = TriggerFiringService(store, queue, 262_144)
+        service.stateProvider = { state[it] }
+        val admitted = mutableListOf<String>()
+        service.coldSession = object : LiveSession {
+            override fun deliverLiveDrop(params: JsonObject, callback: ((String?, JsonObject?) -> Unit)?) = Unit
+            override fun onDurableAdmitted(policy: String) { admitted.add(policy) }
+        }
+        // A wake-backed trigger is authored only under the offline.wake grant.
+        val wakeCaps = caps.copy(offlineWakeGranted = true)
+        fun wakeEntries(vararg t: JsonObject) = TriggerValidator.validateSet(
+            buildJsonObject { put("triggers", JsonArray(t.toList())) }, wakeCaps)
+        service.replaceSet("id", wakeEntries(trig("bat") { put("policy", "wake"); put("ttl_s", 86_400) }))
+        state["battery.level"] = battery(19)
+        service.observeSample("battery.level", battery(19))
+        assertEquals(1, queue.count())
+        assertEquals(listOf("wake"), admitted)
+        // An attached engine takes precedence over the stand-in.
+        val live = mutableListOf<String>()
+        service.attach(object : LiveSession {
+            override fun deliverLiveDrop(params: JsonObject, callback: ((String?, JsonObject?) -> Unit)?) = Unit
+            override fun onDurableAdmitted(policy: String) { live.add(policy) }
+        })
+        service.replaceSet("id", wakeEntries(trig("bat2") { put("policy", "wake"); put("ttl_s", 86_400) }))
+        // Back above the threshold, then below it again: a fresh crossing.
+        state["battery.level"] = battery(50)
+        service.observeSample("battery.level", battery(50))
+        state["battery.level"] = battery(10)
+        service.observeSample("battery.level", battery(10))
+        assertEquals(listOf("wake"), admitted)
+        assertEquals(listOf("wake"), live)
+    }
+
+    @Test
     fun throttleSurvivesServiceReconstruction() {
         val storeFile = File(tmp.root, "t.json")
         val queue = DurableQueue(MemoryQueueStore(), 256, 8_388_608)
